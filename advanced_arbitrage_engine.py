@@ -1,6 +1,7 @@
 import logging
 from collections import defaultdict, deque
 from datetime import datetime
+from itertools import permutations
 
 from bybit_client import BybitClient
 from config import Config
@@ -311,30 +312,23 @@ class AdvancedArbitrageEngine:
         leg1, leg2, leg3 = triangle['legs']
         base_currency = triangle.get('base_currency', 'USDT')
 
-        if direction in (1, 2):
-            legs_sequence = [leg1, leg2, leg3] if direction == 1 else [leg3, leg2, leg1]
-            path = self._build_direction_path(
-                legs_sequence,
+        direction_sequences = self._prepare_direction_sequences([leg1, leg2, leg3], direction)
+        path = None
+
+        for sequence in direction_sequences:
+            path = self._build_universal_path(
+                sequence,
                 base_currency,
                 triangle.get('name', 'unknown'),
                 direction
             )
+            if path:
+                break
 
-            if not path:
-                profit = -100
-            else:
-                profit = self._calculate_triangular_profit_path(prices, path, base_currency)
-
-        else:  # direction == 3
-            path = self._build_direction_three_path(triangle, base_currency)
-            if not path:
-                logger.warning(
-                    f"Путь для направления 3 отклонен: невозможно построить последовательность "
-                    f"торгов для {triangle['name']}"
-                )
-                profit = -100
-            else:
-                profit = self._calculate_triangular_profit_path(prices, path, base_currency)
+        if not path:
+            profit = -100
+        else:
+            profit = self._calculate_triangular_profit_path(prices, path, base_currency)
 
         return {
             'direction': direction,
@@ -342,24 +336,55 @@ class AdvancedArbitrageEngine:
             'path': path
         }
 
-    def _build_direction_path(self, legs_sequence, base_currency, triangle_name, direction):
-        """Итеративное построение пути для направлений 1 и 2"""
+    def _prepare_direction_sequences(self, legs, direction):
+        """Подбор последовательностей ног в зависимости от направления"""
+
+        def _rotations(sequence):
+            base = list(sequence)
+            return [base[i:] + base[:i] for i in range(len(base))]
+
+        if direction == 1:
+            return _rotations(legs)
+        if direction == 2:
+            reversed_legs = list(reversed(legs))
+            return _rotations(reversed_legs)
+
+        unique_sequences = []
+        for perm in permutations(legs):
+            perm_list = list(perm)
+            if perm_list not in unique_sequences:
+                unique_sequences.append(perm_list)
+        return unique_sequences
+
+    def _build_universal_path(self, legs_sequence, base_currency, triangle_name, direction):
+        """Универсальное построение пути на основе текущей валюты"""
         current_asset = base_currency
         path = []
+        remaining_symbols = list(legs_sequence)
 
-        for symbol in legs_sequence:
-            base_cur, quote_cur = self._get_symbol_currencies(symbol)
+        while remaining_symbols:
+            step_found = False
 
-            if current_asset == quote_cur:
-                path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
-                current_asset = base_cur
-            elif current_asset == base_cur:
-                path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
-                current_asset = quote_cur
-            else:
+            for symbol in list(remaining_symbols):
+                base_cur, quote_cur = self._get_symbol_currencies(symbol)
+
+                if current_asset == quote_cur:
+                    path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
+                    current_asset = base_cur
+                    remaining_symbols.remove(symbol)
+                    step_found = True
+                    break
+                if current_asset == base_cur:
+                    path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
+                    current_asset = quote_cur
+                    remaining_symbols.remove(symbol)
+                    step_found = True
+                    break
+
+            if not step_found:
                 logger.warning(
                     f"Невозможно построить путь для {triangle_name} (направление {direction}): "
-                    f"текущая валюта {current_asset} не подходит для сделки {symbol}"
+                    f"текущая валюта {current_asset} не совпадает ни с одной котируемой валютой"
                 )
                 return None
 
@@ -370,55 +395,6 @@ class AdvancedArbitrageEngine:
             return None
 
         return path
-
-    def _build_direction_three_path(self, triangle, base_currency):
-        """Построение альтернативного пути (направление №3) с контролем валют"""
-        leg1, leg2, leg3 = triangle['legs']
-        first_base, first_quote = self._get_symbol_currencies(leg1)
-
-        if base_currency != first_quote:
-            logger.warning(
-                f"Путь отклонен: для первого шага {leg1} требуется {first_quote}, "
-                f"но базовая валюта треугольника {base_currency}"
-            )
-            return None
-
-        initial_step = {'symbol': leg1, 'side': 'Buy', 'price_type': 'ask'}
-        current_asset = first_base
-
-        remaining_orders = [
-            (leg2, leg3),
-            (leg3, leg2)
-        ]
-
-        for order in remaining_orders:
-            path = [initial_step.copy()]
-            asset = current_asset
-            valid_path = True
-
-            for symbol in order:
-                base_cur, quote_cur = self._get_symbol_currencies(symbol)
-
-                if asset == quote_cur:
-                    path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
-                    asset = base_cur
-                elif asset == base_cur:
-                    path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
-                    asset = quote_cur
-                else:
-                    valid_path = False
-                    logger.debug(
-                        f"Невозможно использовать {symbol} на шаге направления 3: текущая валюта {asset}"
-                    )
-                    break
-
-            if valid_path and asset == base_currency:
-                return path
-
-        logger.warning(
-            f"Не найден валидный альтернативный путь для {triangle['name']} (направление 3)"
-        )
-        return None
 
     def _get_symbol_currencies(self, symbol):
         """Определение базовой и котируемой валюты символа"""
