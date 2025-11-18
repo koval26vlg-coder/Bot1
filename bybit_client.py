@@ -14,7 +14,13 @@ class BybitClient:
         self.config = Config()
         self.session = self._create_session()
         self.account_type = "UNIFIED" if not self.config.TESTNET else "CONTRACT"
-        logger.info(f"Bybit client initialized. Testnet: {self.config.TESTNET}, Account type: {self.account_type}")
+        # Всегда заранее сохраняем сегмент рынка, чтобы одинаково использовать его во всех запросах
+        self.market_category = getattr(self.config, "MARKET_CATEGORY", "spot")
+        logger.info(
+            f"Bybit client initialized. Testnet: {self.config.TESTNET}, "
+            f"Account type: {self.account_type}"
+        )
+        logger.info(f"🎯 Market category set to: {self.market_category}")
     
     def _create_session(self):
         """Создание сессии для работы с Bybit API"""
@@ -108,8 +114,15 @@ class BybitClient:
     def _safe_float(self, value, default=0.0):
         """Безопасное преобразование к float, чтобы пустые строки не ломали расчеты."""
         try:
-            if value in (None, ""):
+            if value is None:
                 return default
+
+            # Пустые строки и значения с пробелами должны превращаться в дефолт сразу
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    return default
+
             return float(value)
         except (TypeError, ValueError):
             return default
