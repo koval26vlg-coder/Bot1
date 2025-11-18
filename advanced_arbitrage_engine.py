@@ -1,6 +1,7 @@
 import logging
 from collections import defaultdict, deque
 from datetime import datetime
+from itertools import permutations
 
 from bybit_client import BybitClient
 from config import Config
@@ -32,6 +33,9 @@ class AdvancedArbitrageEngine:
         self.ohlcv_history = {}
         self.last_strategy_context = {}
         self.last_tickers = {}
+        self._last_candidates = []
+        self._last_market_analysis = {'market_conditions': 'normal', 'overall_volatility': 0}
+        self.no_opportunity_cycles = 0
         
         # Статистика по треугольникам
         self.triangle_stats = {}
@@ -222,11 +226,13 @@ class AdvancedArbitrageEngine:
 
         return strategy_result
 
-    def detect_triangular_arbitrage(self, tickers):
+    def detect_triangular_arbitrage(self, tickers, strategy_result=None):
         """Улучшенное обнаружение треугольного арбитража"""
         opportunities = []
         market_analysis = self.analyze_market_conditions()
-        
+        self._last_market_analysis = market_analysis
+        self._last_candidates = []
+
         # Динамический порог прибыли в зависимости от волатильности
         dynamic_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
         if market_analysis['market_conditions'] == 'high_volatility':
@@ -267,7 +273,13 @@ class AdvancedArbitrageEngine:
                 
                 # Выбираем лучшее направление
                 best_direction = max(directions, key=lambda x: x['profit_percent'])
-                
+                self._last_candidates.append({
+                    'triangle': triangle,
+                    'triangle_name': triangle_name,
+                    'best_direction': best_direction,
+                    'prices': prices
+                })
+
                 if best_direction['profit_percent'] > dynamic_profit_threshold:
                     opportunity = {
                         'type': 'triangular',
@@ -311,30 +323,23 @@ class AdvancedArbitrageEngine:
         leg1, leg2, leg3 = triangle['legs']
         base_currency = triangle.get('base_currency', 'USDT')
 
-        if direction in (1, 2):
-            legs_sequence = [leg1, leg2, leg3] if direction == 1 else [leg3, leg2, leg1]
-            path = self._build_direction_path(
-                legs_sequence,
+        direction_sequences = self._prepare_direction_sequences([leg1, leg2, leg3], direction)
+        path = None
+
+        for sequence in direction_sequences:
+            path = self._build_universal_path(
+                sequence,
                 base_currency,
                 triangle.get('name', 'unknown'),
                 direction
             )
+            if path:
+                break
 
-            if not path:
-                profit = -100
-            else:
-                profit = self._calculate_triangular_profit_path(prices, path, base_currency)
-
-        else:  # direction == 3
-            path = self._build_direction_three_path(triangle, base_currency)
-            if not path:
-                logger.warning(
-                    f"Путь для направления 3 отклонен: невозможно построить последовательность "
-                    f"торгов для {triangle['name']}"
-                )
-                profit = -100
-            else:
-                profit = self._calculate_triangular_profit_path(prices, path, base_currency)
+        if not path:
+            profit = -100
+        else:
+            profit = self._calculate_triangular_profit_path(prices, path, base_currency)
 
         return {
             'direction': direction,
@@ -342,24 +347,55 @@ class AdvancedArbitrageEngine:
             'path': path
         }
 
-    def _build_direction_path(self, legs_sequence, base_currency, triangle_name, direction):
-        """Итеративное построение пути для направлений 1 и 2"""
+    def _prepare_direction_sequences(self, legs, direction):
+        """Подбор последовательностей ног в зависимости от направления"""
+
+        def _rotations(sequence):
+            base = list(sequence)
+            return [base[i:] + base[:i] for i in range(len(base))]
+
+        if direction == 1:
+            return _rotations(legs)
+        if direction == 2:
+            reversed_legs = list(reversed(legs))
+            return _rotations(reversed_legs)
+
+        unique_sequences = []
+        for perm in permutations(legs):
+            perm_list = list(perm)
+            if perm_list not in unique_sequences:
+                unique_sequences.append(perm_list)
+        return unique_sequences
+
+    def _build_universal_path(self, legs_sequence, base_currency, triangle_name, direction):
+        """Универсальное построение пути на основе текущей валюты"""
         current_asset = base_currency
         path = []
+        remaining_symbols = list(legs_sequence)
 
-        for symbol in legs_sequence:
-            base_cur, quote_cur = self._get_symbol_currencies(symbol)
+        while remaining_symbols:
+            step_found = False
 
-            if current_asset == quote_cur:
-                path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
-                current_asset = base_cur
-            elif current_asset == base_cur:
-                path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
-                current_asset = quote_cur
-            else:
+            for symbol in list(remaining_symbols):
+                base_cur, quote_cur = self._get_symbol_currencies(symbol)
+
+                if current_asset == quote_cur:
+                    path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
+                    current_asset = base_cur
+                    remaining_symbols.remove(symbol)
+                    step_found = True
+                    break
+                if current_asset == base_cur:
+                    path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
+                    current_asset = quote_cur
+                    remaining_symbols.remove(symbol)
+                    step_found = True
+                    break
+
+            if not step_found:
                 logger.warning(
                     f"Невозможно построить путь для {triangle_name} (направление {direction}): "
-                    f"текущая валюта {current_asset} не подходит для сделки {symbol}"
+                    f"текущая валюта {current_asset} не совпадает ни с одной котируемой валютой"
                 )
                 return None
 
@@ -370,55 +406,6 @@ class AdvancedArbitrageEngine:
             return None
 
         return path
-
-    def _build_direction_three_path(self, triangle, base_currency):
-        """Построение альтернативного пути (направление №3) с контролем валют"""
-        leg1, leg2, leg3 = triangle['legs']
-        first_base, first_quote = self._get_symbol_currencies(leg1)
-
-        if base_currency != first_quote:
-            logger.warning(
-                f"Путь отклонен: для первого шага {leg1} требуется {first_quote}, "
-                f"но базовая валюта треугольника {base_currency}"
-            )
-            return None
-
-        initial_step = {'symbol': leg1, 'side': 'Buy', 'price_type': 'ask'}
-        current_asset = first_base
-
-        remaining_orders = [
-            (leg2, leg3),
-            (leg3, leg2)
-        ]
-
-        for order in remaining_orders:
-            path = [initial_step.copy()]
-            asset = current_asset
-            valid_path = True
-
-            for symbol in order:
-                base_cur, quote_cur = self._get_symbol_currencies(symbol)
-
-                if asset == quote_cur:
-                    path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
-                    asset = base_cur
-                elif asset == base_cur:
-                    path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
-                    asset = quote_cur
-                else:
-                    valid_path = False
-                    logger.debug(
-                        f"Невозможно использовать {symbol} на шаге направления 3: текущая валюта {asset}"
-                    )
-                    break
-
-            if valid_path and asset == base_currency:
-                return path
-
-        logger.warning(
-            f"Не найден валидный альтернативный путь для {triangle['name']} (направление 3)"
-        )
-        return None
 
     def _get_symbol_currencies(self, symbol):
         """Определение базовой и котируемой валюты символа"""
@@ -776,7 +763,26 @@ class AdvancedArbitrageEngine:
         self.last_tickers = tickers
 
         # Обнаружение треугольного арбитража
-        opportunities = self.detect_triangular_arbitrage(tickers)
+        opportunities = self.detect_triangular_arbitrage(tickers, strategy_result)
+
+        if opportunities:
+            self.no_opportunity_cycles = 0
+        else:
+            self.no_opportunity_cycles += 1
+            logger.debug(
+                "Нет треугольных возможностей %s циклов подряд",
+                self.no_opportunity_cycles
+            )
+
+            if self.no_opportunity_cycles >= 3:
+                aggressive = self._generate_aggressive_opportunities_from_cache(strategy_result)
+                if aggressive:
+                    logger.warning(
+                        "⚡ Активирован агрессивный режим: добавлено %s синтетических возможностей",
+                        len(aggressive)
+                    )
+                    opportunities.extend(aggressive)
+                    self.no_opportunity_cycles = 0
 
         if strategy_result:
             for opportunity in opportunities:
@@ -799,6 +805,72 @@ class AdvancedArbitrageEngine:
             logger.info("🔍 No arbitrage opportunities found")
         
         return opportunities
+
+    def _calculate_aggressive_alpha(self, strategy_result, candidate):
+        """Расчет надбавки к ожидаемой прибыли на основе стратегий"""
+        base_boost = 0.1
+
+        market_state = self._last_market_analysis.get('market_conditions', 'normal')
+        if market_state == 'low_volatility':
+            base_boost += 0.05
+        elif market_state == 'high_volatility':
+            base_boost *= 0.5
+
+        if strategy_result:
+            signal = getattr(strategy_result, 'signal', '')
+            score = getattr(strategy_result, 'score', 0)
+
+            if signal in {'increase_risk', 'long_bias'}:
+                base_boost += 0.15
+            elif signal in {'reduce_risk', 'short_bias'}:
+                base_boost *= 0.5
+
+            base_boost += min(0.4, max(0, score) * 0.05)
+
+        # Минимальный буст чтобы гарантировать торговую активность
+        return max(0.05, base_boost)
+
+    def _generate_aggressive_opportunities_from_cache(self, strategy_result):
+        """Создание синтетических возможностей, когда рынок спокоен"""
+        if not self._last_candidates:
+            return []
+
+        aggressive_ops = []
+        sorted_candidates = sorted(
+            self._last_candidates,
+            key=lambda item: item['best_direction']['profit_percent'],
+            reverse=True
+        )
+
+        for candidate in sorted_candidates[:3]:
+            path = candidate['best_direction'].get('path')
+            if not path:
+                continue
+
+            boost = self._calculate_aggressive_alpha(strategy_result, candidate)
+            raw_profit = candidate['best_direction']['profit_percent']
+            adjusted_profit = raw_profit + boost
+
+            opportunity = {
+                'type': 'triangular',
+                'triangle_name': candidate['triangle_name'],
+                'direction': candidate['best_direction']['direction'],
+                'profit_percent': adjusted_profit,
+                'symbols': candidate['triangle']['legs'],
+                'prices': candidate['prices'],
+                'execution_path': path,
+                'timestamp': datetime.now(),
+                'market_conditions': self._last_market_analysis.get('market_conditions', 'normal'),
+                'priority': candidate['triangle'].get('priority', 999),
+                'base_currency': candidate['triangle'].get('base_currency', 'USDT'),
+                'aggressive_mode': True,
+                'raw_profit_percent': raw_profit,
+            }
+
+            self.triangle_stats[candidate['triangle_name']]['opportunities_found'] += 1
+            aggressive_ops.append(opportunity)
+
+        return aggressive_ops
 
     def execute_arbitrage(self, opportunity):
         """Основной метод выполнения арбитража"""
