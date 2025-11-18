@@ -8,7 +8,7 @@ from monitoring import AdvancedMonitor
 from real_trading import RealTradingExecutor
 # Импортируем менеджер стратегий напрямую из локального модуля без пакета strategies
 from indicator_strategies import StrategyManager
-# Импортируем функции статистики напрямую из локального модуля
+# Используем реальный локальный модуль math_stats вместо устаревшего utils.math_stats
 from math_stats import mean, rolling_mean
 
 
