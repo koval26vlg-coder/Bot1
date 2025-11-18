@@ -3,7 +3,15 @@ import logging
 import signal
 import sys
 import os
+from pathlib import Path
 from datetime import datetime
+
+# 👇 Гарантируем, что локальная папка проекта всегда есть в sys.path,
+#    чтобы импорты работали даже при запуске скрипта из другой директории
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from config import Config
 from advanced_arbitrage_engine import AdvancedArbitrageEngine
 
