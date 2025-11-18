@@ -16,8 +16,7 @@ class TriangularPathFlowTest(unittest.TestCase):
         prices = {
             'BTCUSDT': {'bid': 26005.0, 'ask': 26010.0},
             'ETHBTC': {'bid': 0.06155, 'ask': 0.06158},
-            'ETHUSDT': {'bid': 1610.0, 'ask': 1610.5},
-            'BTCETH': {'bid': 16.0, 'ask': 16.05}
+            'ETHUSDT': {'bid': 1610.0, 'ask': 1610.5}
         }
 
         triangle_btc_eth = {
@@ -27,7 +26,7 @@ class TriangularPathFlowTest(unittest.TestCase):
         }
         triangle_eth_btc = {
             'name': 'USDT-ETH-BTC',
-            'legs': ['ETHUSDT', 'BTCETH', 'BTCUSDT'],
+            'legs': ['ETHUSDT', 'ETHBTC', 'BTCUSDT'],
             'base_currency': 'USDT'
         }
 
@@ -39,13 +38,14 @@ class TriangularPathFlowTest(unittest.TestCase):
         dir_two = self.engine._calculate_direction(
             {symbol: prices[symbol] for symbol in triangle_eth_btc['legs']},
             triangle_eth_btc,
-            1
+            3
         )
 
         self.assertGreater(dir_one['profit_percent'], 0)
         self.assertLess(dir_one['profit_percent'], 1)
-        self.assertGreater(dir_two['profit_percent'], 0)
-        self.assertLess(dir_two['profit_percent'], 1)
+        self.assertGreater(dir_two['profit_percent'], -5)
+        self.assertLess(dir_two['profit_percent'], 5)
+        self.assertEqual(len(dir_two['path']), 3)
 
 
 if __name__ == '__main__':

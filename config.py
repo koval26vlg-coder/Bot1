@@ -1,146 +1,116 @@
+import logging
 import os
+
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
 
 class Config:
     # API настройки
     API_KEY = os.getenv('BYBIT_API_KEY')
     API_SECRET = os.getenv('BYBIT_API_SECRET')
     TESTNET = os.getenv('TESTNET', 'True').lower() == 'true'
+    STRATEGY_MODE = os.getenv('STRATEGY_MODE', 'auto')
+    MANUAL_STRATEGY_NAME = os.getenv('MANUAL_STRATEGY_NAME') or ''
+
+    # Базовый список наблюдаемых символов (фильтруется динамически)
+    DEFAULT_SYMBOLS = [
+        'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'ADAUSDT',
+        'DOTUSDT', 'LINKUSDT', 'MATICUSDT', 'AVAXUSDT', 'XRPUSDT'
+    ]
+
+    # Приоритеты базовых активов для генерации треугольников
+    TRIANGLE_BASES = {
+        'BTC': 1,
+        'ETH': 1,
+        'BNB': 2,
+        'SOL': 2,
+        'ADA': 3,
+        'DOT': 3,
+        'LINK': 3,
+        'MATIC': 3,
+        'AVAX': 3,
+        'XRP': 3
+    }
+
+    KNOWN_QUOTES = ['USDT', 'USDC', 'BTC', 'ETH', 'BNB']
+
+    def __init__(self):
+        self._triangular_pairs_cache = None
+        self._available_symbols_cache = None
+        self._available_cross_map_cache = None
+        self._symbol_watchlist_cache = None
 
     @property
     def MARKET_CATEGORY(self):
         """Возвращает тип сегмента рынка в зависимости от режима"""
         return 'linear' if self.TESTNET else 'spot'
-    STRATEGY_MODE = os.getenv('STRATEGY_MODE', 'auto')
-    MANUAL_STRATEGY_NAME = os.getenv('MANUAL_STRATEGY_NAME') or ''
-    
-    # Основные символы для мониторинга
-    SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'ADAUSDT', 'DOTUSDT', 'LINKUSDT', 'MATICUSDT', 'AVAXUSDT', 'XRPUSDT']
-    STRATEGY_MODE = 'adaptive'
-    
+
+    @property
+    def API_BASE_URL(self):
+        """Базовый URL публичного API Bybit"""
+        return 'https://api-testnet.bybit.com' if self.TESTNET else 'https://api.bybit.com'
+
+    @property
+    def AVAILABLE_CROSSES(self):
+        """Карта доступных кроссов (BASE -> список тикеров)"""
+        cross_map = self._build_available_cross_map()
+        if not cross_map:
+            return {}
+
+        summary = {}
+        for base, quotes in cross_map.items():
+            symbols = [f"{base}{quote}" for quote in sorted(quotes)]
+            summary[base] = symbols
+        return summary
+
+    @property
+    def SYMBOLS(self):
+        """Список наблюдаемых тикеров, согласованный с биржей"""
+        if self._symbol_watchlist_cache is None:
+            watchlist = set(self.DEFAULT_SYMBOLS)
+            for triangle in self.TRIANGULAR_PAIRS:
+                watchlist.update(triangle['legs'])
+            self._symbol_watchlist_cache = sorted(watchlist)
+        return self._symbol_watchlist_cache
+
     @property
     def TRIANGULAR_PAIRS(self):
-        """Динамическая конфигурация треугольников в зависимости от тестнета"""
-        if self.TESTNET:
-            # В тестнете реально доступны только пары с ETHBTC, поэтому оставляем
-            # лишь те треугольники, которые можно действительно исполнить
-            return [
-                {
-                    'name': 'USDT-BTC-ETH-USDT',
-                    # USDT -> BTC (BTCUSDT), BTC -> ETH (ETHBTC), ETH -> USDT (ETHUSDT)
-                    'legs': ['BTCUSDT', 'ETHBTC', 'ETHUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 1
-                },
-                {
-                    'name': 'USDT-ETH-BTC-USDT',
-                    # USDT -> ETH (ETHUSDT), ETH -> BTC (ETHBTC), BTC -> USDT (BTCUSDT)
-                    'legs': ['ETHUSDT', 'ETHBTC', 'BTCUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 1
-                }
-            ]
-        else:
-            # Полные треугольники для основной сети
-            return [
-                # Основные треугольники с BTC и ETH
-                {
-                    'name': 'USDT-BTC-ETH-USDT',
-                    'legs': ['BTCUSDT', 'ETHBTC', 'ETHUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 1
-                },
-                {
-                    'name': 'USDT-ETH-BTC-USDT',
-                    'legs': ['ETHUSDT', 'ETHBTC', 'BTCUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 1
-                },
-                
-                # Треугольники с BNB
-                {
-                    'name': 'USDT-BNB-BTC',
-                    'legs': ['BNBUSDT', 'BTCBNB', 'BTCUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 2
-                },
-                {
-                    'name': 'USDT-BNB-ETH',
-                    'legs': ['BNBUSDT', 'ETHBNB', 'ETHUSDT'],
-                    'base_currency': 'USDT', 
-                    'priority': 2
-                },
-                
-                # Треугольники с SOL
-                {
-                    'name': 'USDT-SOL-BTC',
-                    'legs': ['SOLUSDT', 'BTCSOL', 'BTCUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 2
-                },
-                {
-                    'name': 'USDT-SOL-ETH',
-                    'legs': ['SOLUSDT', 'ETHSOL', 'ETHUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 2
-                },
-                
-                # Треугольники с ADA
-                {
-                    'name': 'USDT-ADA-BTC',
-                    'legs': ['ADAUSDT', 'BTCADA', 'BTCUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 3
-                },
-                {
-                    'name': 'USDT-ADA-ETH',
-                    'legs': ['ADAUSDT', 'ETHADA', 'ETHUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 3
-                },
-                
-                # Дополнительные треугольники
-                {
-                    'name': 'USDT-DOT-BTC',
-                    'legs': ['DOTUSDT', 'BTCDOT', 'BTCUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 3
-                },
-                {
-                    'name': 'USDT-LINK-ETH',
-                    'legs': ['LINKUSDT', 'ETHLINK', 'ETHUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 3
-                },
-                {
-                    'name': 'USDT-AVAX-BTC',
-                    'legs': ['AVAXUSDT', 'BTCAVAX', 'BTCUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 3
-                },
-                {
-                    'name': 'USDT-XRP-ETH',
-                    'legs': ['XRPUSDT', 'ETHXRP', 'ETHUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 3
-                },
-                
-                # Сложные треугольники с 3 альткойнами
-                {
-                    'name': 'USDT-BNB-SOL',
-                    'legs': ['BNBUSDT', 'SOLBNB', 'SOLUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 4
-                },
-                {
-                    'name': 'USDT-ADA-DOT',
-                    'legs': ['ADAUSDT', 'DOTADA', 'DOTUSDT'],
-                    'base_currency': 'USDT',
-                    'priority': 4
-                }
-            ]
+        """Динамическая конфигурация треугольников в зависимости от доступных тикеров"""
+        if self._triangular_pairs_cache is not None:
+            return self._triangular_pairs_cache
+
+        templates = self._build_triangle_templates()
+        available_symbols = self._fetch_market_symbols()
+
+        if available_symbols:
+            valid_pairs = []
+            for triangle in templates:
+                if all(leg in available_symbols for leg in triangle['legs']):
+                    valid_pairs.append(triangle)
+                else:
+                    missing = [leg for leg in triangle['legs'] if leg not in available_symbols]
+                    logger.debug(
+                        "Пропускаем треугольник %s из-за отсутствующих ног: %s",
+                        triangle['name'],
+                        ', '.join(missing)
+                    )
+
+            if valid_pairs:
+                self._triangular_pairs_cache = valid_pairs
+                return self._triangular_pairs_cache
+
+            logger.warning(
+                "API не вернул треугольники с полным покрытием. Используем шаблон как запасной вариант."
+            )
+
+        # Фолбэк (например, оффлайн среда или ошибки сети)
+        self._triangular_pairs_cache = templates
+        return self._triangular_pairs_cache
     
     @property 
     def MIN_TRIANGULAR_PROFIT(self):
@@ -183,11 +153,6 @@ class Config:
     MIN_LIQUIDITY = 1000  # Минимальная ликвидность для торговли (USDT)
 
     @property
-    def MARKET_CATEGORY(self):
-        """Возвращает сегмент рынка для запросов к Bybit"""
-        return "linear" if self.TESTNET else "spot"
-
-    @property
     def MIN_PROFIT_PERCENT(self):
         """Порог прибыли для простого арбитража"""
         return self._MIN_PROFIT_PERCENT
@@ -196,3 +161,99 @@ class Config:
     def TRADE_AMOUNT(self):
         """Сумма для торговли"""
         return self._TRADE_AMOUNT
+
+    def _build_triangle_templates(self):
+        """Создает список потенциальных треугольников с корректными тикерами"""
+        templates = [
+            {
+                'name': 'USDT-BTC-ETH-USDT',
+                'legs': ['BTCUSDT', 'ETHBTC', 'ETHUSDT'],
+                'base_currency': 'USDT',
+                'priority': 1
+            },
+            {
+                'name': 'USDT-ETH-BTC-USDT',
+                'legs': ['ETHUSDT', 'ETHBTC', 'BTCUSDT'],
+                'base_currency': 'USDT',
+                'priority': 1
+            }
+        ]
+
+        for asset, priority in self.TRIANGLE_BASES.items():
+            if asset in {'BTC', 'ETH'}:
+                continue
+
+            templates.append({
+                'name': f'USDT-{asset}-BTC',
+                'legs': [f'{asset}USDT', f'{asset}BTC', 'BTCUSDT'],
+                'base_currency': 'USDT',
+                'priority': priority
+            })
+            templates.append({
+                'name': f'USDT-{asset}-ETH',
+                'legs': [f'{asset}USDT', f'{asset}ETH', 'ETHUSDT'],
+                'base_currency': 'USDT',
+                'priority': priority
+            })
+
+        return templates
+
+    def _fetch_market_symbols(self):
+        """Получает доступные тикеры через публичный REST Bybit"""
+        if self._available_symbols_cache is not None:
+            return self._available_symbols_cache
+
+        url = f"{self.API_BASE_URL}/v5/market/instruments-info"
+        params = {'category': self.MARKET_CATEGORY}
+
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('retCode') == 0:
+                symbols = {
+                    item['symbol']
+                    for item in data.get('result', {}).get('list', [])
+                    if item.get('symbol')
+                }
+                self._available_symbols_cache = symbols
+                logger.info(
+                    "Получено %s тикеров для категории %s", len(symbols), self.MARKET_CATEGORY
+                )
+                return self._available_symbols_cache
+
+            logger.warning(
+                "REST ответил кодом %s: %s", data.get('retCode'), data.get('retMsg')
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                "Не удалось получить инструменты Bybit (%s): %s", self.MARKET_CATEGORY, exc
+            )
+
+        self._available_symbols_cache = set()
+        return self._available_symbols_cache
+
+    def _build_available_cross_map(self):
+        """Формирует карту доступных кроссов BASE -> QUOTE"""
+        if self._available_cross_map_cache is not None:
+            return self._available_cross_map_cache
+
+        symbols = self._fetch_market_symbols()
+        cross_map = {}
+        for symbol in symbols:
+            base, quote = self._split_symbol(symbol)
+            if not base or not quote:
+                continue
+            cross_map.setdefault(base, set()).add(quote)
+
+        self._available_cross_map_cache = cross_map
+        return self._available_cross_map_cache
+
+    def _split_symbol(self, symbol):
+        """Разделяет тикер на базовую и котируемую валюты"""
+        for quote in sorted(self.KNOWN_QUOTES, key=len, reverse=True):
+            if symbol.endswith(quote) and len(symbol) > len(quote):
+                return symbol[:-len(quote)], quote
+
+        midpoint = len(symbol) // 2
+        return symbol[:midpoint], symbol[midpoint:]
