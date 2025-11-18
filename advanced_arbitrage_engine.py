@@ -7,6 +7,7 @@ from config import Config
 from monitoring import AdvancedMonitor
 from real_trading import RealTradingExecutor
 from indicator_strategies import StrategyManager
+# Импортируем функции статистики напрямую из локального модуля
 from math_stats import mean, rolling_mean
 
 
