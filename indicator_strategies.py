@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Sequence
 
-# Импортируем статистические функции напрямую из локального модуля
+# Используем функции из реального локального модуля math_stats вместо utils.math_stats
 from math_stats import mean
 
 
