@@ -311,23 +311,19 @@ class AdvancedArbitrageEngine:
         leg1, leg2, leg3 = triangle['legs']
         base_currency = triangle.get('base_currency', 'USDT')
 
-        if direction == 1:
-            # A -> B -> C -> A
-            path = [
-                {'symbol': leg1, 'side': 'Buy', 'price_type': 'ask'},
-                {'symbol': leg2, 'side': 'Buy', 'price_type': 'ask'},
-                {'symbol': leg3, 'side': 'Sell', 'price_type': 'bid'}
-            ]
-            profit = self._calculate_triangular_profit_path(prices, path, base_currency)
+        if direction in (1, 2):
+            legs_sequence = [leg1, leg2, leg3] if direction == 1 else [leg3, leg2, leg1]
+            path = self._build_direction_path(
+                legs_sequence,
+                base_currency,
+                triangle.get('name', 'unknown'),
+                direction
+            )
 
-        elif direction == 2:
-            # A -> C -> B -> A
-            path = [
-                {'symbol': leg3, 'side': 'Buy', 'price_type': 'ask'},
-                {'symbol': leg2, 'side': 'Sell', 'price_type': 'bid'},
-                {'symbol': leg1, 'side': 'Sell', 'price_type': 'bid'}
-            ]
-            profit = self._calculate_triangular_profit_path(prices, path, base_currency)
+            if not path:
+                profit = -100
+            else:
+                profit = self._calculate_triangular_profit_path(prices, path, base_currency)
 
         else:  # direction == 3
             path = self._build_direction_three_path(triangle, base_currency)
@@ -345,6 +341,35 @@ class AdvancedArbitrageEngine:
             'profit_percent': profit,
             'path': path
         }
+
+    def _build_direction_path(self, legs_sequence, base_currency, triangle_name, direction):
+        """Итеративное построение пути для направлений 1 и 2"""
+        current_asset = base_currency
+        path = []
+
+        for symbol in legs_sequence:
+            base_cur, quote_cur = self._get_symbol_currencies(symbol)
+
+            if current_asset == quote_cur:
+                path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
+                current_asset = base_cur
+            elif current_asset == base_cur:
+                path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
+                current_asset = quote_cur
+            else:
+                logger.warning(
+                    f"Невозможно построить путь для {triangle_name} (направление {direction}): "
+                    f"текущая валюта {current_asset} не подходит для сделки {symbol}"
+                )
+                return None
+
+        if current_asset != base_currency:
+            logger.warning(
+                f"Путь для {triangle_name} (направление {direction}) не возвращает базовую валюту {base_currency}"
+            )
+            return None
+
+        return path
 
     def _build_direction_three_path(self, triangle, base_currency):
         """Построение альтернативного пути (направление №3) с контролем валют"""
