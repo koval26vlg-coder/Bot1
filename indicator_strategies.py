@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Sequence
 
-from utils.math_stats import mean
+from math_stats import mean
 
 
 
