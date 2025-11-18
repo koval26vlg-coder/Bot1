@@ -6,8 +6,8 @@ from bybit_client import BybitClient
 from config import Config
 from monitoring import AdvancedMonitor
 from real_trading import RealTradingExecutor
-from strategies.indicator_strategies import StrategyManager
-from utils.math_stats import mean, rolling_mean
+from indicator_strategies import StrategyManager
+from math_stats import mean, rolling_mean
 
 
 logger = logging.getLogger(__name__)
