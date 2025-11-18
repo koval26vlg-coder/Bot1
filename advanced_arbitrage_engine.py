@@ -33,6 +33,9 @@ class AdvancedArbitrageEngine:
         self.ohlcv_history = {}
         self.last_strategy_context = {}
         self.last_tickers = {}
+        self._last_candidates = []
+        self._last_market_analysis = {'market_conditions': 'normal', 'overall_volatility': 0}
+        self.no_opportunity_cycles = 0
         
         # Статистика по треугольникам
         self.triangle_stats = {}
@@ -223,11 +226,13 @@ class AdvancedArbitrageEngine:
 
         return strategy_result
 
-    def detect_triangular_arbitrage(self, tickers):
+    def detect_triangular_arbitrage(self, tickers, strategy_result=None):
         """Улучшенное обнаружение треугольного арбитража"""
         opportunities = []
         market_analysis = self.analyze_market_conditions()
-        
+        self._last_market_analysis = market_analysis
+        self._last_candidates = []
+
         # Динамический порог прибыли в зависимости от волатильности
         dynamic_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
         if market_analysis['market_conditions'] == 'high_volatility':
@@ -268,7 +273,13 @@ class AdvancedArbitrageEngine:
                 
                 # Выбираем лучшее направление
                 best_direction = max(directions, key=lambda x: x['profit_percent'])
-                
+                self._last_candidates.append({
+                    'triangle': triangle,
+                    'triangle_name': triangle_name,
+                    'best_direction': best_direction,
+                    'prices': prices
+                })
+
                 if best_direction['profit_percent'] > dynamic_profit_threshold:
                     opportunity = {
                         'type': 'triangular',
@@ -752,7 +763,26 @@ class AdvancedArbitrageEngine:
         self.last_tickers = tickers
 
         # Обнаружение треугольного арбитража
-        opportunities = self.detect_triangular_arbitrage(tickers)
+        opportunities = self.detect_triangular_arbitrage(tickers, strategy_result)
+
+        if opportunities:
+            self.no_opportunity_cycles = 0
+        else:
+            self.no_opportunity_cycles += 1
+            logger.debug(
+                "Нет треугольных возможностей %s циклов подряд",
+                self.no_opportunity_cycles
+            )
+
+            if self.no_opportunity_cycles >= 3:
+                aggressive = self._generate_aggressive_opportunities_from_cache(strategy_result)
+                if aggressive:
+                    logger.warning(
+                        "⚡ Активирован агрессивный режим: добавлено %s синтетических возможностей",
+                        len(aggressive)
+                    )
+                    opportunities.extend(aggressive)
+                    self.no_opportunity_cycles = 0
 
         if strategy_result:
             for opportunity in opportunities:
@@ -775,6 +805,72 @@ class AdvancedArbitrageEngine:
             logger.info("🔍 No arbitrage opportunities found")
         
         return opportunities
+
+    def _calculate_aggressive_alpha(self, strategy_result, candidate):
+        """Расчет надбавки к ожидаемой прибыли на основе стратегий"""
+        base_boost = 0.1
+
+        market_state = self._last_market_analysis.get('market_conditions', 'normal')
+        if market_state == 'low_volatility':
+            base_boost += 0.05
+        elif market_state == 'high_volatility':
+            base_boost *= 0.5
+
+        if strategy_result:
+            signal = getattr(strategy_result, 'signal', '')
+            score = getattr(strategy_result, 'score', 0)
+
+            if signal in {'increase_risk', 'long_bias'}:
+                base_boost += 0.15
+            elif signal in {'reduce_risk', 'short_bias'}:
+                base_boost *= 0.5
+
+            base_boost += min(0.4, max(0, score) * 0.05)
+
+        # Минимальный буст чтобы гарантировать торговую активность
+        return max(0.05, base_boost)
+
+    def _generate_aggressive_opportunities_from_cache(self, strategy_result):
+        """Создание синтетических возможностей, когда рынок спокоен"""
+        if not self._last_candidates:
+            return []
+
+        aggressive_ops = []
+        sorted_candidates = sorted(
+            self._last_candidates,
+            key=lambda item: item['best_direction']['profit_percent'],
+            reverse=True
+        )
+
+        for candidate in sorted_candidates[:3]:
+            path = candidate['best_direction'].get('path')
+            if not path:
+                continue
+
+            boost = self._calculate_aggressive_alpha(strategy_result, candidate)
+            raw_profit = candidate['best_direction']['profit_percent']
+            adjusted_profit = raw_profit + boost
+
+            opportunity = {
+                'type': 'triangular',
+                'triangle_name': candidate['triangle_name'],
+                'direction': candidate['best_direction']['direction'],
+                'profit_percent': adjusted_profit,
+                'symbols': candidate['triangle']['legs'],
+                'prices': candidate['prices'],
+                'execution_path': path,
+                'timestamp': datetime.now(),
+                'market_conditions': self._last_market_analysis.get('market_conditions', 'normal'),
+                'priority': candidate['triangle'].get('priority', 999),
+                'base_currency': candidate['triangle'].get('base_currency', 'USDT'),
+                'aggressive_mode': True,
+                'raw_profit_percent': raw_profit,
+            }
+
+            self.triangle_stats[candidate['triangle_name']]['opportunities_found'] += 1
+            aggressive_ops.append(opportunity)
+
+        return aggressive_ops
 
     def execute_arbitrage(self, opportunity):
         """Основной метод выполнения арбитража"""
