@@ -822,16 +822,9 @@ class AdvancedArbitrageEngine:
             self.trade_history.pop(0)
 
     def get_strategy_status(self):
+        """Возвращает актуальный режим и состояние стратегий."""
         return {
             'mode': getattr(self.config, 'STRATEGY_MODE', 'adaptive'),
-            'active': self.strategy_manager.get_active_strategy_name(),
-            'context': self.last_strategy_context,
-            'strategies': self.strategy_manager.get_strategy_snapshot()
-        }
-
-    def get_strategy_status(self):
-        return {
-            'mode': self.config.STRATEGY_MODE,
             'active': self.strategy_manager.get_active_strategy_name(),
             'context': self.last_strategy_context,
             'strategies': self.strategy_manager.get_strategy_snapshot()

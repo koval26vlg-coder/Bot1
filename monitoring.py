@@ -39,7 +39,18 @@ class AdvancedMonitor:
         self.last_performance_report = None
         self._psutil_warning_logged = False
         self.last_balance_snapshot = None
-    
+
+    def _get_strategy_status(self):
+        """Безопасно возвращает статус стратегии из движка."""
+        if not self.engine or not hasattr(self.engine, 'get_strategy_status'):
+            return {}
+
+        try:
+            return self.engine.get_strategy_status() or {}
+        except Exception as exc:
+            logger.debug(f"Не удалось получить статус стратегий: {exc}")
+            return {}
+
     def track_api_call(self, endpoint, duration):
         """Отслеживание времени ответа API"""
         self.api_response_times.append({
@@ -318,7 +329,8 @@ class AdvancedMonitor:
                 'active_trades': len(self.trade_history),
                 'last_trade_time': self.trade_history[-1]['timestamp'].strftime('%Y-%m-%d %H:%M:%S') if self.trade_history else 'N/A',
                 'cooldown_violations': self.cooldown_violations,
-                'api_errors': self.api_errors
+                'api_errors': self.api_errors,
+                'strategy': self._get_strategy_status()
             }
 
             # Определение статуса
@@ -378,7 +390,8 @@ class AdvancedMonitor:
         """Отправка сводки по системе (теперь просто логирование)"""
         health = self.health_check()
         report = self.last_performance_report or {}
-        
+        strategy_status = health.get('strategy') or self._get_strategy_status()
+
         logger.info(
             f"🖥️ Системная сводка:\n"
             f"   ⏱️ Время работы: {health.get('uptime', 'N/A')}\n"
@@ -389,7 +402,8 @@ class AdvancedMonitor:
             f"   💾 Память: {health.get('memory_usage', 'N/A')}\n"
             f"   ⚡ API latency: {health.get('api_latency', 0):.2f}с\n"
             f"   ❌ Ошибок API: {health.get('api_errors', 0)}\n"
-            f"   ⏳ Нарушений кулдауна: {health.get('cooldown_violations', 0)}"
+            f"   ⏳ Нарушений кулдауна: {health.get('cooldown_violations', 0)}\n"
+            f"   🧠 Режим стратегии: {strategy_status.get('mode', 'N/A')} | Активная: {strategy_status.get('active', 'N/A')}"
         )
     
     def start_monitoring_loop(self):
