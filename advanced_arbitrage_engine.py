@@ -39,6 +39,7 @@ class AdvancedArbitrageEngine:
         self.aggressive_filter_metrics = defaultdict(int)
         self._last_reported_balance = None
         self._last_dynamic_threshold = None
+        self._quote_suffix_cache = None
         
         # Статистика по треугольникам
         self.triangle_stats = {}
@@ -523,20 +524,42 @@ class AdvancedArbitrageEngine:
 
         return path
 
+    def _refresh_quote_suffix_cache(self):
+        """Формирует список известных окончаний котировок с учетом данных биржи."""
+        quotes = set(self.config.KNOWN_QUOTES)
+
+        try:
+            available_crosses = self.config.AVAILABLE_CROSSES
+        except Exception:  # pragma: no cover - на случай сетевых ошибок
+            available_crosses = {}
+
+        for base_currency, symbols in (available_crosses or {}).items():
+            for cross_symbol in symbols:
+                if cross_symbol.startswith(base_currency):
+                    quote = cross_symbol[len(base_currency):]
+                    if quote:
+                        quotes.add(quote)
+                elif cross_symbol.endswith(base_currency):
+                    quote = cross_symbol[:-len(base_currency)]
+                    if quote:
+                        quotes.add(quote)
+
+        self._quote_suffix_cache = sorted(filter(None, quotes), key=len, reverse=True)
+
     def _get_symbol_currencies(self, symbol):
-        """Определение базовой и котируемой валюты символа"""
-        known_quotes = [
-            'USDT', 'USDC', 'BTC', 'ETH', 'BNB', 'SOL', 'ADA', 'DOT',
-            'LINK', 'MATIC', 'AVAX', 'XRP', 'DOGE', 'LTC', 'TRX', 'ETC'
-        ]
+        """Определение базовой и котируемой валюты с максимальным использованием справочников."""
+        base, quote = self.config._split_symbol(symbol)
+        if base and quote:
+            return base, quote
 
-        for quote in sorted(known_quotes, key=len, reverse=True):
-            if symbol.endswith(quote):
-                base = symbol[:-len(quote)]
-                if base:
-                    return base, quote
+        if not hasattr(self, '_quote_suffix_cache') or self._quote_suffix_cache is None:
+            self._refresh_quote_suffix_cache()
 
-        # Резервный случай для неизвестных пар
+        for quote_candidate in self._quote_suffix_cache:
+            if symbol.endswith(quote_candidate) and len(symbol) > len(quote_candidate):
+                return symbol[:-len(quote_candidate)], quote_candidate
+
+        # Резервный случай для неизвестных пар: делим тикер пополам
         midpoint = len(symbol) // 2
         return symbol[:midpoint], symbol[midpoint:]
 
