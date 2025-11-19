@@ -211,12 +211,49 @@ class RealTradingExecutor:
     def _calculate_real_profit(self, results, trade_plan):
         """Расчет реальной прибыли на основе исполненных ордеров"""
         try:
-            # Этот метод должен быть реализован в зависимости от типа арбитража
-            # Пока возвращаем оценочную прибыль из trade_plan
-            return trade_plan.get('estimated_profit_usdt', 0)
+            base_currency = trade_plan.get('base_currency', 'USDT')
+            fee_rate = getattr(self.config, 'TRADING_FEE', 0)
+
+            # Инициализируем балансы: стартуем только с базовой валюты
+            balances = {base_currency: float(trade_plan.get('initial_amount', 0))}
+
+            for order in results:
+                symbol = order.get('symbol') or ''
+                side = (order.get('side') or '').lower()
+                price = float(order.get('avgPrice') or order.get('price') or 0)
+                quantity = float(order.get('cumExecQty') or order.get('qty') or 0)
+
+                base, quote = self._split_symbol(symbol)
+                if not base or not quote or price <= 0 or quantity <= 0:
+                    logger.warning("⚠️ Пропуск ордера из-за некорректных данных при расчёте прибыли")
+                    continue
+
+                if side == 'buy':
+                    # Покупаем базовый актив за котируемую валюту, комиссия уменьшает получаемое количество
+                    cost = price * quantity
+                    balances[quote] = balances.get(quote, 0) - cost
+                    received = quantity * (1 - fee_rate)
+                    balances[base] = balances.get(base, 0) + received
+                elif side == 'sell':
+                    # Продаём базовый актив за котируемую валюту, комиссия уменьшает итоговую выручку
+                    balances[base] = balances.get(base, 0) - quantity
+                    proceeds = price * quantity * (1 - fee_rate)
+                    balances[quote] = balances.get(quote, 0) + proceeds
+                else:
+                    logger.warning("⚠️ Неизвестная сторона сделки при расчёте прибыли")
+
+            return balances.get(base_currency, 0) - float(trade_plan.get('initial_amount', 0))
         except Exception as e:
             logger.error(f"Ошибка расчета реальной прибыли: {str(e)}")
             return 0
+
+    def _split_symbol(self, symbol):
+        """Разделяет тикер на базовую и котируемую валюты"""
+        for quote in sorted(self.config.KNOWN_QUOTES, key=len, reverse=True):
+            if symbol.endswith(quote):
+                base = symbol[:-len(quote)]
+                return base, quote
+        return None, None
     
     def get_performance_stats(self):
         """Получение статистики производительности"""
