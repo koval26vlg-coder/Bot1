@@ -286,13 +286,50 @@ class AdvancedArbitrageEngine:
         self._last_market_analysis = market_analysis
         self._last_candidates = []
 
-        # Динамический порог прибыли в зависимости от волатильности
-        dynamic_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
+        # Динамический порог прибыли в зависимости от внешних факторов
+        base_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
+        dynamic_profit_threshold = base_profit_threshold
+        threshold_adjustments = []
+
         if market_analysis['market_conditions'] == 'high_volatility':
             dynamic_profit_threshold += 0.1  # Увеличиваем порог при высокой волатильности
+            threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.1})
         elif market_analysis['market_conditions'] == 'low_volatility':
             dynamic_profit_threshold -= 0.05  # Уменьшаем порог при низкой волатильности
-        
+            threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.05})
+
+        # Корректировка по сигналу стратегии
+        strategy_adjustment = 0.0
+        if strategy_result:
+            signal = (strategy_result.signal or '').lower()
+            confidence = getattr(strategy_result, 'confidence', 0) or 0
+            confidence = max(0.0, min(1.0, confidence))
+            strategy_bias_map = {
+                'increase_risk': -0.04,
+                'long_bias': -0.03,
+                'reduce_risk': 0.04,
+                'short_bias': 0.03
+            }
+            if signal in strategy_bias_map:
+                strategy_adjustment = strategy_bias_map[signal] * (1 + confidence)
+                dynamic_profit_threshold += strategy_adjustment
+                threshold_adjustments.append({
+                    'reason': f'сигнал стратегии {signal}',
+                    'value': strategy_adjustment
+                })
+
+        # Корректировка в зависимости от количества пустых циклов
+        if self.no_opportunity_cycles > 0:
+            empty_cycle_adjustment = -min(self.no_opportunity_cycles * 0.01, 0.05)
+            dynamic_profit_threshold += empty_cycle_adjustment
+            threshold_adjustments.append({
+                'reason': f'{self.no_opportunity_cycles} пустых циклов',
+                'value': empty_cycle_adjustment
+            })
+
+        dynamic_profit_threshold = max(0.0, dynamic_profit_threshold)
+        rejected_candidates = 0
+
         for triangle in sorted(self.config.TRIANGULAR_PAIRS,
                              key=lambda x: x.get('priority', 999)):
             triangle_name = triangle.get('name', 'triangle')
@@ -364,11 +401,25 @@ class AdvancedArbitrageEngine:
                               f"Profit: {best_direction['profit_percent']:.4f}% - "
                               f"Market: {market_analysis['market_conditions']}")
 
+                else:
+                    rejected_candidates += 1
+
             except Exception as e:
                 logger.error(f"Error in triangle {triangle_name}: {str(e)}")
-        
+
         # Сортировка по прибыльности и приоритету
         opportunities.sort(key=lambda x: (x['profit_percent'], -x['priority']), reverse=True)
+
+        total_candidates = len(self._last_candidates)
+        if hasattr(self, 'monitor') and hasattr(self.monitor, 'log_profit_threshold'):
+            self.monitor.log_profit_threshold(
+                final_threshold=dynamic_profit_threshold,
+                rejected_candidates=rejected_candidates,
+                base_threshold=base_profit_threshold,
+                adjustments=threshold_adjustments,
+                market_conditions=market_analysis['market_conditions'],
+                total_candidates=total_candidates
+            )
         return opportunities
 
     def _calculate_direction(self, prices, triangle, direction):

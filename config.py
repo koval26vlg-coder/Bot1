@@ -44,6 +44,7 @@ class Config:
         self._available_symbols_cache = None
         self._available_cross_map_cache = None
         self._symbol_watchlist_cache = None
+        self._min_triangular_profit_override = self._load_min_triangular_profit_override()
 
     @property
     def MARKET_CATEGORY(self):
@@ -112,10 +113,12 @@ class Config:
         self._triangular_pairs_cache = templates
         return self._triangular_pairs_cache
     
-    @property 
+    @property
     def MIN_TRIANGULAR_PROFIT(self):
         """Динамический порог прибыли для тестнета"""
-        return 0.0 if self.TESTNET else 0.25
+        if self._min_triangular_profit_override is not None:
+            return self._min_triangular_profit_override
+        return 0.0 if self.TESTNET else 0.15
     
     @property
     def UPDATE_INTERVAL(self):
@@ -161,6 +164,30 @@ class Config:
     def TRADE_AMOUNT(self):
         """Сумма для торговли"""
         return self._TRADE_AMOUNT
+
+    def _load_min_triangular_profit_override(self):
+        """Читает переопределение порога прибыли из переменной окружения"""
+        raw_value = os.getenv('MIN_TRIANGULAR_PROFIT')
+        if raw_value is None:
+            return None
+
+        normalized_value = raw_value.replace(',', '.')
+        try:
+            profit_value = float(normalized_value)
+        except ValueError:
+            logger.warning(
+                "Некорректное значение MIN_TRIANGULAR_PROFIT='%s'. Используем дефолтный порог.",
+                raw_value
+            )
+            return None
+
+        if profit_value < 0:
+            logger.warning(
+                "MIN_TRIANGULAR_PROFIT не может быть отрицательным. Используем дефолтный порог."
+            )
+            return None
+
+        return profit_value
 
     def _build_triangle_templates(self):
         """Создает список потенциальных треугольников, согласованный с реальными тикерами"""
