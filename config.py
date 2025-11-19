@@ -256,44 +256,52 @@ class Config:
         return self._build_static_triangle_templates()
 
     def _build_dynamic_triangle_templates(self, available_symbols):
-        """Генерация треугольников с учетом того, какие тикеры реально доступны"""
+        """Генерация всех возможных треугольников на основе доступных инструментов"""
         if not available_symbols:
             return []
 
         templates = []
-        base_currency = 'USDT'
-        bridge_assets = [quote for quote in self.KNOWN_QUOTES if quote != base_currency]
+        registered = set()
+        base_candidates = self._discover_base_currencies(available_symbols)
 
-        def add_triangle(name, primary_asset, secondary_asset, priority):
-            legs = self._resolve_triangle_legs(
-                base_currency,
-                primary_asset,
-                secondary_asset,
-                available_symbols
-            )
-            if legs:
-                templates.append({
-                    'name': name,
-                    'legs': legs,
-                    'base_currency': base_currency,
-                    'priority': priority
-                })
-
-        # Базовые треугольники BTC/ETH
-        add_triangle('USDT-BTC-ETH-USDT', 'BTC', 'ETH', 1)
-        add_triangle('USDT-ETH-BTC-USDT', 'ETH', 'BTC', 1)
-
-        # Динамические треугольники для остальных базовых активов
-        for asset, priority in sorted(self.TRIANGLE_BASES.items(), key=lambda item: item[1]):
-            if asset in {'BTC', 'ETH'}:
+        for base_currency in base_candidates:
+            connected_assets = sorted(self._collect_connected_assets(base_currency, available_symbols))
+            if len(connected_assets) < 2:
                 continue
 
-            for bridge in bridge_assets:
-                if bridge == asset:
+            for primary_asset in connected_assets:
+                if primary_asset == base_currency:
                     continue
 
-                triangle_name = f'{base_currency}-{asset}-{bridge}-{base_currency}'
-                add_triangle(triangle_name, asset, bridge, priority)
+                for secondary_asset in connected_assets:
+                    if secondary_asset in {primary_asset, base_currency}:
+                        continue
+
+                    legs = self._resolve_triangle_legs(
+                        base_currency,
+                        primary_asset,
+                        secondary_asset,
+                        available_symbols
+                    )
+                    if not legs:
+                        continue
+
+                    triangle_name = f'{base_currency}-{primary_asset}-{secondary_asset}-{base_currency}'
+                    if triangle_name in registered:
+                        continue
+
+                    priority = min(
+                        self.TRIANGLE_BASES.get(primary_asset, 5),
+                        self.TRIANGLE_BASES.get(secondary_asset, 5)
+                    )
+
+                    templates.append({
+                        'name': triangle_name,
+                        'legs': legs,
+                        'base_currency': base_currency,
+                        'priority': priority
+                    })
+                    registered.add(triangle_name)
 
         return templates
 
@@ -332,6 +340,50 @@ class Config:
             })
 
         return templates
+
+    def _discover_base_currencies(self, available_symbols):
+        """Определяет подходящие базовые валюты для старта треугольников"""
+        currencies = set()
+        for symbol in available_symbols:
+            base, quote = self._split_symbol(symbol)
+            if base:
+                currencies.add(base)
+            if quote:
+                currencies.add(quote)
+
+        preferred_order = [
+            'USDT', 'USDC', 'BTC', 'ETH', 'BNB', 'EUR', 'USD', 'DAI'
+        ]
+
+        ordered = []
+        for currency in preferred_order:
+            if currency in currencies:
+                ordered.append(currency)
+
+        for currency in sorted(currencies):
+            if currency not in ordered:
+                ordered.append(currency)
+
+        result = []
+        for currency in ordered:
+            connected = self._collect_connected_assets(currency, available_symbols)
+            if len(connected) >= 2:
+                result.append(currency)
+
+        return result
+
+    def _collect_connected_assets(self, anchor_currency, available_symbols):
+        """Находит все валюты, которые можно напрямую обменять на указанную"""
+        connected = set()
+        for symbol in available_symbols:
+            base, quote = self._split_symbol(symbol)
+            if base == anchor_currency and quote:
+                connected.add(quote)
+            elif quote == anchor_currency and base:
+                connected.add(base)
+
+        connected.discard(anchor_currency)
+        return connected
 
     def _resolve_triangle_legs(self, base_currency, primary_asset, secondary_asset, available_symbols):
         """Подбирает реальные тикеры для треугольника Base -> Primary -> Secondary -> Base"""
