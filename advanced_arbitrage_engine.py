@@ -160,41 +160,91 @@ class AdvancedArbitrageEngine:
 
         return market_analysis
 
-    def _build_market_dataframe(self, symbol=None):
-        symbol = symbol or self.config.SYMBOLS[0]
-        if symbol not in self.ohlcv_history:
-            return []
+    def _build_market_dataframe(self, symbol=None, min_points=5):
+        """Формирует список баров по одному символу или агрегирует несколько."""
 
-        ohlcv = self.ohlcv_history[symbol]
-        if len(ohlcv['close']) < 30:
-            return []
+        def _rows_for_symbol(sym):
+            history = self.ohlcv_history.get(sym)
+            if not history:
+                return []
 
-        market_rows = []
-        for ts, o, h, l, c, v in zip(
-            ohlcv['timestamps'],
-            ohlcv['open'],
-            ohlcv['high'],
-            ohlcv['low'],
-            ohlcv['close'],
-            ohlcv['volume']
-        ):
-            market_rows.append({
-                'timestamp': ts,
-                'open': o,
-                'high': h,
-                'low': l,
-                'close': c,
-                'volume': v
-            })
+            if len(history['close']) < min_points:
+                return []
 
-        return market_rows
+            rows = []
+            for ts, o, h, l, c, v in zip(
+                history['timestamps'],
+                history['open'],
+                history['high'],
+                history['low'],
+                history['close'],
+                history['volume']
+            ):
+                rows.append({
+                    'timestamp': ts,
+                    'symbol': sym,
+                    'open': o,
+                    'high': h,
+                    'low': l,
+                    'close': c,
+                    'volume': v
+                })
+            return rows
+
+        if symbol:
+            return _rows_for_symbol(symbol)
+
+        aggregated_rows = []
+        for sym in sorted(self.ohlcv_history.keys()):
+            aggregated_rows.extend(_rows_for_symbol(sym))
+
+        if not aggregated_rows:
+            # Возвращаем наилучший доступный набор данных даже если точек меньше минимума
+            fallback_symbol = max(
+                self.ohlcv_history.keys(),
+                key=lambda s: len(self.ohlcv_history[s]['close']),
+                default=None
+            )
+            if fallback_symbol:
+                history = self.ohlcv_history[fallback_symbol]
+                for ts, o, h, l, c, v in zip(
+                    history['timestamps'],
+                    history['open'],
+                    history['high'],
+                    history['low'],
+                    history['close'],
+                    history['volume']
+                ):
+                    aggregated_rows.append({
+                        'timestamp': ts,
+                        'symbol': fallback_symbol,
+                        'open': o,
+                        'high': h,
+                        'low': l,
+                        'close': c,
+                        'volume': v
+                    })
+
+        aggregated_rows.sort(key=lambda row: row['timestamp'])
+        return aggregated_rows
 
     def evaluate_strategies(self):
         market_data = self._build_market_dataframe()
         if not market_data:
             return None
 
-        closes = [row['close'] for row in market_data if row['close'] is not None]
+        closes_by_symbol = defaultdict(list)
+        for row in market_data:
+            close_value = row.get('close')
+            if close_value is None:
+                continue
+            symbol_key = row.get('symbol', 'default')
+            closes_by_symbol[symbol_key].append(close_value)
+
+        closes = []
+        if closes_by_symbol:
+            closes = max(closes_by_symbol.values(), key=len)
+
         price_changes = []
         for previous, current in zip(closes, closes[1:]):
             if previous:
