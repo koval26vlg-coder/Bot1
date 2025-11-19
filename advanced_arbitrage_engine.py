@@ -37,6 +37,7 @@ class AdvancedArbitrageEngine:
         self._last_market_analysis = {'market_conditions': 'normal', 'overall_volatility': 0}
         self.no_opportunity_cycles = 0
         self.aggressive_filter_metrics = defaultdict(int)
+        self._last_reported_balance = None
         
         # Статистика по треугольникам
         self.triangle_stats = {}
@@ -973,10 +974,21 @@ class AdvancedArbitrageEngine:
         logger.info(f"   Profit: {opportunity['profit_percent']:.4f}%")
         logger.info(f"   Market: {opportunity['market_conditions']}")
         
-        # Получаем баланс
-        balance = {'available': 100.0}  # Временно для тестнета
+        # Получаем фактический баланс
+        balance = self._fetch_actual_balance()
         balance_usdt = balance['available']
-        
+
+        if hasattr(self, 'monitor') and hasattr(self.monitor, 'update_balance_snapshot'):
+            self.monitor.update_balance_snapshot(balance_usdt)
+
+        configured_amount = getattr(self.config, 'TRADE_AMOUNT', 0)
+        if configured_amount and balance_usdt + 1e-6 < configured_amount:
+            logger.warning(
+                "⚖️ Доступный баланс %.2f USDT ниже настроенного объёма сделки %.2f USDT",
+                balance_usdt,
+                configured_amount
+            )
+
         if balance_usdt < max(5, self.config.TRADE_AMOUNT * 0.1):
             logger.warning(f"❌ Insufficient balance. Available: {balance_usdt:.2f} USDT")
             self.monitor.check_balance_health(balance_usdt)
@@ -1008,6 +1020,42 @@ class AdvancedArbitrageEngine:
             logger.error("❌ Arbitrage execution failed")
 
         return success
+
+    def _fetch_actual_balance(self, coin='USDT'):
+        """Возвращает нормализованный баланс с обработкой ошибок."""
+        default_balance = {'available': 0.0, 'total': 0.0, 'coin': coin}
+
+        try:
+            balance = self.client.get_balance(coin)
+            if not isinstance(balance, dict):
+                raise ValueError('Некорректный формат ответа баланса')
+        except Exception as exc:
+            logger.error("🔥 Ошибка получения баланса %s: %s", coin, str(exc))
+            return default_balance
+
+        available = self._safe_float(balance.get('available', 0.0))
+        total = self._safe_float(balance.get('total', available))
+
+        if total > 0:
+            discrepancy = abs(total - available)
+            if discrepancy > total * 0.05:
+                logger.warning(
+                    "📉 Расхождение баланса %s: доступно %.2f USDT из %.2f USDT",
+                    coin,
+                    available,
+                    total
+                )
+
+        self._last_reported_balance = available
+
+        return {'available': available, 'total': total, 'coin': balance.get('coin', coin)}
+
+    def _safe_float(self, value, default=0.0):
+        """Безопасное преобразование значений в float."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def _is_triangle_on_cooldown(self, triangle_name):
         """Проверка кулдауна треугольника без побочных эффектов"""

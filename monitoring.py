@@ -38,6 +38,7 @@ class AdvancedMonitor:
         self.api_errors = 0
         self.last_performance_report = None
         self._psutil_warning_logged = False
+        self.last_balance_snapshot = None
     
     def track_api_call(self, endpoint, duration):
         """Отслеживание времени ответа API"""
@@ -178,7 +179,7 @@ class AdvancedMonitor:
                 f"Ошибка: {error_message}\n"
                 f"Рекомендуется перезапустить бота или проверить API ключи."
             )
-    
+
     def check_balance_health(self, balance_usdt):
         """Проверка здоровья баланса"""
         if balance_usdt < self.alert_thresholds['min_balance']:
@@ -188,6 +189,13 @@ class AdvancedMonitor:
                 f"Минимальный порог: {self.alert_thresholds['min_balance']} USDT\n"
                 f"Торговля может быть приостановлена из-за недостатка средств."
             )
+
+    def update_balance_snapshot(self, balance_usdt):
+        """Сохраняет последнее значение баланса для мониторинга."""
+        self.last_balance_snapshot = {
+            'timestamp': datetime.now(),
+            'balance': balance_usdt
+        }
     
     def generate_performance_report(self):
         """Генерация отчета о производительности"""
