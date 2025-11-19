@@ -111,10 +111,29 @@ class AdvancedMonitor:
         # Очистка старых данных (хранить только последние 1000 сделок)
         if len(self.trade_history) > 1000:
             self.trade_history.pop(0)
-        
+
         # Анализ эффективности сделок
         self._analyze_trade_performance()
-    
+
+    def log_profit_threshold(self, final_threshold, rejected_candidates, *, base_threshold, adjustments,
+                              market_conditions=None, total_candidates=0):
+        """Логирование итогового порога и статистики отбора кандидатов"""
+        adjustments = adjustments or []
+        adjustments_summary = ', '.join(
+            f"{adj['reason']}: {adj['value']:+.4f}"
+            for adj in adjustments
+        ) or 'без корректировок'
+
+        logger.info(
+            "🎚️ Итоговый порог прибыли %.4f%% (база %.4f%%) | Условия: %s | Кандидатов: %s | Отброшено: %s",
+            final_threshold,
+            base_threshold,
+            market_conditions or 'неизвестно',
+            total_candidates,
+            rejected_candidates
+        )
+        logger.debug("Корректировки порога: %s", adjustments_summary)
+
     def _analyze_trade_performance(self):
         """Анализ эффективности сделок"""
         if len(self.trade_history) < 10:
