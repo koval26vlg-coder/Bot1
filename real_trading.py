@@ -66,8 +66,12 @@ class RealTradingExecutor:
         self.risk_manager = RiskManager()
         
         # Режим симуляции (True = симуляция, False = реальные ордера)
-        self.simulation_mode = self.config.TESTNET or os.getenv('SIMULATION_MODE', 'True').lower() == 'true'
-        
+        simulation_override = os.getenv('SIMULATION_MODE')
+        if simulation_override is not None:
+            self.simulation_mode = simulation_override.lower() == 'true'
+        else:
+            self.simulation_mode = self.config.TESTNET
+
         logger.info(f"🔄 Real Trading Executor initialized. Simulation mode: {self.simulation_mode}")
     
     def set_real_mode(self, enable_real_mode):

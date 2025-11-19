@@ -140,7 +140,45 @@ class BybitClient:
                 f"⏱️ Сбор {len(tickers)} тикеров занял {duration:.2f} с (запросов: {request_count})"
             )
 
+        self._validate_ticker_freshness(tickers)
+
         return tickers
+
+    def _validate_ticker_freshness(self, tickers):
+        """Проверяет насколько свежие котировки получены от Bybit"""
+        if not tickers:
+            return
+
+        freshness_limit_ms = int(self.config.TICKER_STALENESS_WARNING_SEC * 1000)
+        now_ms = int(time.time() * 1000)
+        stale = []
+
+        for symbol, data in tickers.items():
+            timestamp = data.get('timestamp')
+            if not timestamp:
+                continue
+
+            try:
+                age_ms = now_ms - int(float(timestamp))
+            except (TypeError, ValueError):
+                continue
+
+            if age_ms > freshness_limit_ms:
+                stale.append((symbol, age_ms / 1000))
+
+        if stale:
+            preview = ', '.join(f"{sym} ({age:.1f}с)" for sym, age in stale[:5])
+            logger.warning(
+                "🕒 Обнаружены устаревшие котировки (>%.1fс): %s",
+                self.config.TICKER_STALENESS_WARNING_SEC,
+                preview
+            )
+        else:
+            logger.debug(
+                "Котировки %s инструментов свежее %.1f секунд",
+                len(tickers),
+                self.config.TICKER_STALENESS_WARNING_SEC
+            )
         
     def get_balance(self, coin='USDT'):
         """Получение баланса для конкретной монеты - исправленная версия для тестнета"""
