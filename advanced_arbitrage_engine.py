@@ -229,8 +229,9 @@ class AdvancedArbitrageEngine:
         aggregated_rows.sort(key=lambda row: row['timestamp'])
         return aggregated_rows
 
-    def evaluate_strategies(self):
-        market_data = self._build_market_dataframe()
+    def evaluate_strategies(self, market_data=None):
+        if market_data is None:
+            market_data = self._build_market_dataframe()
         if not market_data:
             return None
 
@@ -791,27 +792,29 @@ class AdvancedArbitrageEngine:
         for triangle in self.config.TRIANGULAR_PAIRS:
             for symbol in triangle['legs']:
                 all_symbols.add(symbol)
-        
+
         tickers = self.client.get_tickers(list(all_symbols))
 
         if not tickers:
             logger.warning("❌ No ticker data received")
             return []
 
-        # Оцениваем стратегии до обновления буферов
-        strategy_result = self.evaluate_strategies()
+        # Обновляем рыночные данные
+        self.update_market_data(tickers)
+
+        # Сохраняем последние цены для визуализации
+        self.last_tickers = tickers
+
+        market_data = self._build_market_dataframe()
+
+        # Оцениваем стратегии уже на свежих данных
+        strategy_result = self.evaluate_strategies(market_data)
         active_strategy_name = self.strategy_manager.get_active_strategy_name()
         logger.info(
             "⚙️ Strategy mode=%s | Active=%s",
             self.config.STRATEGY_MODE,
             active_strategy_name
         )
-
-        # Обновляем рыночные данные
-        self.update_market_data(tickers)
-
-        # Сохраняем последние цены для визуализации
-        self.last_tickers = tickers
 
         # Обнаружение треугольного арбитража
         opportunities = self.detect_triangular_arbitrage(tickers, strategy_result)
