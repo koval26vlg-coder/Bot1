@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Sequence
 
@@ -26,7 +27,7 @@ class StrategyManager:
     def __init__(self, config):
         self.config = config
         self.active_strategy = 'volatility_adaptive'
-        self._strategies: Dict[str, Callable[[Sequence[dict], Dict[str, float]], Optional[StrategyResult]]] = {
+        self._strategies: Dict[str, Callable[[Sequence[dict], Dict[str, float]], StrategyResult]] = {
             'volatility_adaptive': self._volatility_adaptive_strategy,
             'momentum_bias': self._momentum_bias_strategy,
         }
@@ -63,7 +64,7 @@ class StrategyManager:
         self,
         market_df: Sequence[dict],
         context: Dict[str, float]
-    ) -> Optional[StrategyResult]:
+    ) -> StrategyResult:
         """Корректирует агрессивность торговли в зависимости от волатильности."""
 
         volatility = context.get('volatility', 0.0)
@@ -91,21 +92,43 @@ class StrategyManager:
         self,
         market_df: Sequence[dict],
         context: Dict[str, float]
-    ) -> Optional[StrategyResult]:
-        """Оценивает импульс рынка на основе средних значений."""
+    ) -> StrategyResult:
+        """Оценивает импульс рынка и сама контролирует достаточность выборки."""
 
-        if len(market_df) < 30:
-            return None
+        closes_by_symbol = defaultdict(list)
+        for row in market_df:
+            close_value = row.get('close')
+            if close_value is None:
+                continue
+            closes_by_symbol[row.get('symbol', 'default')].append(close_value)
 
-        closes = [row['close'] for row in market_df if row.get('close') is not None]
-        if len(closes) < 30:
-            return None
+        closes: Sequence[float] = []
+        if closes_by_symbol:
+            closes = max(closes_by_symbol.values(), key=len)
 
-        short_ma = mean(closes[-10:])
-        long_ma = mean(closes[-30:])
+        min_required = 12
+        if len(closes) < min_required:
+            readiness = len(closes) / min_required if min_required else 0
+            return StrategyResult(
+                name='momentum_bias',
+                signal='wait_for_data',
+                score=float(readiness * 0.5),
+                confidence=float(min(0.3, readiness / 2)),
+            )
+
+        short_window = min(10, len(closes))
+        long_window = min(25, len(closes))
+
+        short_ma = mean(closes[-short_window:])
+        long_ma = mean(closes[-long_window:])
 
         if long_ma == 0:
-            return None
+            return StrategyResult(
+                name='momentum_bias',
+                signal='neutral',
+                score=0.0,
+                confidence=0.0,
+            )
 
         momentum = float(((short_ma - long_ma) / long_ma) * 100)
 
