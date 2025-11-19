@@ -36,6 +36,7 @@ class AdvancedArbitrageEngine:
         self._last_candidates = []
         self._last_market_analysis = {'market_conditions': 'normal', 'overall_volatility': 0}
         self.no_opportunity_cycles = 0
+        self.aggressive_filter_metrics = defaultdict(int)
         
         # Статистика по треугольникам
         self.triangle_stats = {}
@@ -885,6 +886,9 @@ class AdvancedArbitrageEngine:
         if not self._last_candidates:
             return []
 
+        if not hasattr(self, 'aggressive_filter_metrics'):
+            self.aggressive_filter_metrics = defaultdict(int)
+
         aggressive_ops = []
         sorted_candidates = sorted(
             self._last_candidates,
@@ -892,14 +896,39 @@ class AdvancedArbitrageEngine:
             reverse=True
         )
 
+        filtered_negative = 0
+        filtered_below_threshold = 0
+
         for candidate in sorted_candidates[:3]:
             path = candidate['best_direction'].get('path')
             if not path:
                 continue
 
-            boost = self._calculate_aggressive_alpha(strategy_result, candidate)
             raw_profit = candidate['best_direction']['profit_percent']
-            adjusted_profit = raw_profit + boost
+            if raw_profit <= 0:
+                filtered_negative += 1
+                self.aggressive_filter_metrics['negative_raw_filtered'] += 1
+                logger.debug(
+                    "⚠️ Агрессивный кандидат %s отброшен: отрицательная сырая прибыль %.4f%%",
+                    candidate['triangle_name'],
+                    raw_profit
+                )
+                continue
+
+            boost = self._calculate_aggressive_alpha(strategy_result, candidate)
+            clamped_raw = max(raw_profit, 0)
+            adjusted_profit = clamped_raw + boost
+
+            if adjusted_profit < self.config.MIN_TRIANGULAR_PROFIT:
+                filtered_below_threshold += 1
+                self.aggressive_filter_metrics['below_min_profit_filtered'] += 1
+                logger.debug(
+                    "⚠️ Агрессивный кандидат %s отброшен: скорректированная прибыль %.4f%% ниже порога %.4f%%",
+                    candidate['triangle_name'],
+                    adjusted_profit,
+                    self.config.MIN_TRIANGULAR_PROFIT
+                )
+                continue
 
             opportunity = {
                 'type': 'triangular',
@@ -919,6 +948,13 @@ class AdvancedArbitrageEngine:
 
             self.triangle_stats[candidate['triangle_name']]['opportunities_found'] += 1
             aggressive_ops.append(opportunity)
+
+        if filtered_negative or filtered_below_threshold:
+            logger.info(
+                "📊 Фильтрация агрессивных кандидатов: отрицательных=%s, ниже порога=%s",
+                filtered_negative,
+                filtered_below_threshold
+            )
 
         return aggressive_ops
 
