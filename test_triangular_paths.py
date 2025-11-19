@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+import advanced_arbitrage_engine
 from advanced_arbitrage_engine import AdvancedArbitrageEngine
 from config import Config
 
@@ -62,6 +63,38 @@ class ConfigTriangularPairsBaseCurrencyTest(unittest.TestCase):
             self.assertEqual(triangle['base_currency'], 'USDT')
             self.assertTrue(triangle['legs'][0].endswith('USDT'))
             self.assertTrue(triangle['legs'][-1].endswith('USDT'))
+
+
+class ExoticFiatSymbolPathTest(unittest.TestCase):
+    """Проверяем построение маршрутов для тикеров с фиатными котировками."""
+
+    def setUp(self):
+        self.engine = AdvancedArbitrageEngine.__new__(AdvancedArbitrageEngine)
+        self.engine.config = Config()
+        self.engine._quote_suffix_cache = None
+        self.engine.config._available_cross_map_cache = {
+            'SOL': {'USDT', 'BRL'},
+            'USDC': {'USDT', 'BRL'},
+            'BRL': {'USDT'},
+            'WIF': {'USDT', 'EUR'},
+            'EUR': {'USDT'}
+        }
+
+    def _assert_exotic_path(self, legs, base_currency='USDT'):
+        with patch.object(advanced_arbitrage_engine.logger, 'warning') as mock_warning:
+            path = self.engine._build_universal_path(legs, base_currency, 'Test', 1)
+        self.assertIsNotNone(path)
+        self.assertEqual(len(path), 3)
+        mock_warning.assert_not_called()
+
+    def test_solbrl_path(self):
+        self._assert_exotic_path(['SOLUSDT', 'SOLBRL', 'BRLUSDT'])
+
+    def test_usdcbrl_path(self):
+        self._assert_exotic_path(['USDCUSDT', 'USDCBRL', 'BRLUSDT'])
+
+    def test_wifeur_path(self):
+        self._assert_exotic_path(['WIFUSDT', 'WIFEUR', 'EURUSDT'])
 
 
 if __name__ == '__main__':

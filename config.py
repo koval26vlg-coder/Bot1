@@ -37,7 +37,11 @@ class Config:
         'XRP': 3
     }
 
-    KNOWN_QUOTES = ['USDT', 'USDC', 'BTC', 'ETH', 'BNB']
+    KNOWN_QUOTES = [
+        'USDT', 'USDC', 'BTC', 'ETH', 'BNB',
+        # Основные фиатные валюты, встречающиеся на Bybit
+        'USD', 'EUR', 'BRL', 'TRY', 'AUD', 'GBP', 'JPY', 'MXN', 'ARS', 'CHF'
+    ]
     # Поддерживаемые стартовые валюты для построения треугольников
     TRADING_BASE_CURRENCIES = ['USDT']
 
