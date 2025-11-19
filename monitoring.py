@@ -290,14 +290,35 @@ class AdvancedMonitor:
                 writer.writeheader()
                 
                 for trade in self.trade_history:
-                    for result in trade.get('results', []):
+                    results = trade.get('results') or []
+
+                    if not results:
+                        details = trade.get('details', {})
+                        symbols = details.get('symbols') or trade.get('symbol') or ''
+                        if isinstance(symbols, (list, tuple)):
+                            symbols = ','.join(symbols)
+                        # Создаем упрощённую запись для сделок старого формата
+                        results = [{
+                            'symbol': symbols,
+                            'side': details.get('direction', trade.get('direction', '')),
+                            'qty': details.get('initial_amount', 0),
+                            'price': details.get('price', 0)
+                        }]
+
+                    for result in results:
+                        timestamp = trade['timestamp']
+                        if hasattr(timestamp, 'strftime'):
+                            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                        else:
+                            timestamp_str = str(timestamp)
+
                         writer.writerow({
-                            'timestamp': trade['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
+                            'timestamp': timestamp_str,
                             'symbol': result.get('symbol', ''),
                             'side': result.get('side', ''),
                             'amount': result.get('qty', result.get('cumExecQty', 0)),
                             'price': result.get('avgPrice', result.get('price', 0)),
-                            'profit': trade.get('total_profit', 0) if result == trade['results'][-1] else 0,
+                            'profit': trade.get('total_profit', 0) if result == results[-1] else 0,
                             'simulated': trade.get('simulated', False),
                             'trade_details': json.dumps(trade.get('trade_plan', {}))
                         })
