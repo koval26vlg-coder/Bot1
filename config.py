@@ -163,7 +163,60 @@ class Config:
         return self._TRADE_AMOUNT
 
     def _build_triangle_templates(self):
-        """Создает список потенциальных треугольников с корректными тикерами"""
+        """Создает список потенциальных треугольников, согласованный с реальными тикерами"""
+        available_symbols = self._fetch_market_symbols()
+        dynamic_templates = self._build_dynamic_triangle_templates(available_symbols)
+
+        if dynamic_templates:
+            return dynamic_templates
+
+        # Фолбэк на статическую конфигурацию, если API недоступно или ничего не построено
+        return self._build_static_triangle_templates()
+
+    def _build_dynamic_triangle_templates(self, available_symbols):
+        """Генерация треугольников с учетом того, какие тикеры реально доступны"""
+        if not available_symbols:
+            return []
+
+        templates = []
+        base_currency = 'USDT'
+        bridge_assets = [quote for quote in self.KNOWN_QUOTES if quote != base_currency]
+
+        def add_triangle(name, primary_asset, secondary_asset, priority):
+            legs = self._resolve_triangle_legs(
+                base_currency,
+                primary_asset,
+                secondary_asset,
+                available_symbols
+            )
+            if legs:
+                templates.append({
+                    'name': name,
+                    'legs': legs,
+                    'base_currency': base_currency,
+                    'priority': priority
+                })
+
+        # Базовые треугольники BTC/ETH
+        add_triangle('USDT-BTC-ETH-USDT', 'BTC', 'ETH', 1)
+        add_triangle('USDT-ETH-BTC-USDT', 'ETH', 'BTC', 1)
+
+        # Динамические треугольники для остальных базовых активов
+        for asset, priority in sorted(self.TRIANGLE_BASES.items(), key=lambda item: item[1]):
+            if asset in {'BTC', 'ETH'}:
+                continue
+
+            for bridge in bridge_assets:
+                if bridge == asset:
+                    continue
+
+                triangle_name = f'{base_currency}-{asset}-{bridge}-{base_currency}'
+                add_triangle(triangle_name, asset, bridge, priority)
+
+        return templates
+
+    def _build_static_triangle_templates(self):
+        """Резервный список треугольников на случай оффлайн режима"""
         templates = [
             {
                 'name': 'USDT-BTC-ETH-USDT',
@@ -184,19 +237,50 @@ class Config:
                 continue
 
             templates.append({
-                'name': f'USDT-{asset}-BTC',
+                'name': f'USDT-{asset}-BTC-USDT',
                 'legs': [f'{asset}USDT', f'{asset}BTC', 'BTCUSDT'],
                 'base_currency': 'USDT',
                 'priority': priority
             })
             templates.append({
-                'name': f'USDT-{asset}-ETH',
+                'name': f'USDT-{asset}-ETH-USDT',
                 'legs': [f'{asset}USDT', f'{asset}ETH', 'ETHUSDT'],
                 'base_currency': 'USDT',
                 'priority': priority
             })
 
         return templates
+
+    def _resolve_triangle_legs(self, base_currency, primary_asset, secondary_asset, available_symbols):
+        """Подбирает реальные тикеры для треугольника Base -> Primary -> Secondary -> Base"""
+        legs = []
+        currency_pairs = [
+            (primary_asset, base_currency),
+            (secondary_asset, primary_asset),
+            (secondary_asset, base_currency)
+        ]
+
+        for base, quote in currency_pairs:
+            symbol = self._resolve_market_symbol(base, quote, available_symbols)
+            if not symbol:
+                return None
+            legs.append(symbol)
+
+        return legs
+
+    def _resolve_market_symbol(self, base_currency, quote_currency, available_symbols):
+        """Находит фактический тикер между двумя валютами в любой ориентации"""
+        base_currency = base_currency.upper()
+        quote_currency = quote_currency.upper()
+        direct = f"{base_currency}{quote_currency}"
+        reverse = f"{quote_currency}{base_currency}"
+
+        if direct in available_symbols:
+            return direct
+        if reverse in available_symbols:
+            return reverse
+
+        return None
 
     def _fetch_market_symbols(self):
         """Получает доступные тикеры через публичный REST Bybit"""
