@@ -3,6 +3,7 @@ import logging
 import signal
 import sys
 import os
+import importlib
 from pathlib import Path
 from datetime import datetime
 
@@ -16,6 +17,17 @@ from config import Config
 from advanced_arbitrage_engine import AdvancedArbitrageEngine
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_psutil_available():
+    """Проверяет доступность psutil перед запуском мониторинга"""
+    if importlib.util.find_spec("psutil") is None:
+        message = (
+            "❗ Модуль psutil не найден. Установите зависимости командой "
+            "'pip install -r requirements.txt'."
+        )
+        print(message, file=sys.stderr)
+        sys.exit(1)
 
 def setup_logging():
     """Настройка расширенного логгирования"""
@@ -83,7 +95,9 @@ def main():
     logger.info(f"⏰ Update interval: {config.UPDATE_INTERVAL} seconds")
     logger.info(f"📊 Dashboard: http://localhost:{os.getenv('DASHBOARD_PORT', '8050')}")
     logger.info("=" * 70)
-    
+
+    ensure_psutil_available()
+
     engine = AdvancedArbitrageEngine()
     killer = GracefulKiller()
     
