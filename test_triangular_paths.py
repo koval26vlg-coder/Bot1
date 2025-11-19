@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from advanced_arbitrage_engine import AdvancedArbitrageEngine
 from config import Config
@@ -46,6 +47,21 @@ class TriangularPathFlowTest(unittest.TestCase):
         self.assertGreater(dir_two['profit_percent'], -5)
         self.assertLess(dir_two['profit_percent'], 5)
         self.assertEqual(len(dir_two['path']), 3)
+
+
+class ConfigTriangularPairsBaseCurrencyTest(unittest.TestCase):
+    """Проверяем, что все маршруты начинаются и заканчиваются на поддерживаемой базе."""
+
+    @patch.object(Config, '_fetch_market_symbols', return_value=set())
+    def test_all_triangles_use_usdt_base(self, _mock_symbols):
+        config = Config()
+        triangles = config.TRIANGULAR_PAIRS
+
+        self.assertGreater(len(triangles), 0)
+        for triangle in triangles:
+            self.assertEqual(triangle['base_currency'], 'USDT')
+            self.assertTrue(triangle['legs'][0].endswith('USDT'))
+            self.assertTrue(triangle['legs'][-1].endswith('USDT'))
 
 
 if __name__ == '__main__':
