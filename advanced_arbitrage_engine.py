@@ -47,6 +47,7 @@ class AdvancedArbitrageEngine:
             self.triangle_stats[triangle['name']] = {
                 'opportunities_found': 0,
                 'executed_trades': 0,
+                'failures': 0,
                 'total_profit': 0,
                 'last_execution': None,
                 'success_rate': 0
@@ -746,11 +747,9 @@ class AdvancedArbitrageEngine:
                 self.triangle_stats[triangle_name]['executed_trades'] += 1
                 self.triangle_stats[triangle_name]['total_profit'] += trade_plan['estimated_profit_usdt']
                 self.triangle_stats[triangle_name]['last_execution'] = datetime.now()
-                
+
                 # Расчет успешности
-                total_trades = self.triangle_stats[triangle_name]['executed_trades']
-                successful_trades = self.triangle_stats[triangle_name]['executed_trades']  # Пока все успешные
-                self.triangle_stats[triangle_name]['success_rate'] = successful_trades / total_trades
+                self._update_triangle_success_rate(triangle_name)
                 
                 logger.info(f"✅ Triangular arbitrage executed successfully! "
                           f"Time: {execution_time:.2f}s, "
@@ -788,13 +787,27 @@ class AdvancedArbitrageEngine:
                 # Обновляем статистику неудач
                 triangle_name = opportunity['triangle_name']
                 self.triangle_stats[triangle_name]['failures'] += 1
+                self._update_triangle_success_rate(triangle_name)
                 return False
-                
+
         except Exception as e:
             logger.error(f"🔥 Critical error executing triangular arbitrage: {str(e)}", exc_info=True)
             if hasattr(self, 'monitor') and hasattr(self.monitor, 'notify_alert'):
                 self.monitor.notify_alert(f"Ошибка треугольного арбитража: {str(e)}", "critical")
             return False
+
+    def _update_triangle_success_rate(self, triangle_name):
+        """Пересчитывает успешность треугольника с учетом всех попыток."""
+        stats = self.triangle_stats.get(triangle_name)
+        if not stats:
+            return
+
+        total_attempts = stats['executed_trades'] + stats.get('failures', 0)
+        if total_attempts == 0:
+            stats['success_rate'] = 0
+            return
+
+        stats['success_rate'] = stats['executed_trades'] / total_attempts
 
     def _validate_opportunity_still_exists(self, opportunity, current_tickers):
         """Проверка, что арбитражная возможность все еще существует"""
