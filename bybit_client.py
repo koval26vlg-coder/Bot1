@@ -1,5 +1,6 @@
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
 
 try:
@@ -41,40 +42,104 @@ class BybitClient:
             raise
     
     def get_tickers(self, symbols):
-        """Получение текущих цен с отладочным логированием"""
+        """Получение котировок пачками с минимальным числом HTTP-запросов"""
+        requested_symbols = sorted(set(symbols))
         tickers = {}
-        logger.debug(f"🔍 Requesting {len(symbols)} symbols: {symbols}")
-    
-        for symbol in symbols:
-            try:
-                response = self.session.get_tickers(
-                    category=self.market_category,
-                    symbol=symbol
+
+        if not requested_symbols:
+            return tickers
+
+        logger.debug(f"🔍 Requesting {len(requested_symbols)} symbols: {requested_symbols}")
+
+        remaining_symbols = set(requested_symbols)
+        start_time = time.time()
+        request_count = 0
+
+        def _extract_from_response(response, label):
+            """Извлекает данные тикеров из ответа и обновляет остаток"""
+            nonlocal tickers
+            if not response:
+                logger.debug(f"❌ Пустой ответ в блоке {label}")
+                return
+
+            if response.get('retCode') != 0 or not response.get('result'):
+                logger.debug(f"❌ API error in {label}: {response.get('retMsg')}")
+                return
+
+            ticker_list = response['result'].get('list', [])
+            for ticker_data in ticker_list:
+                symbol = ticker_data.get('symbol')
+                if symbol not in remaining_symbols:
+                    continue
+
+                tickers[symbol] = {
+                    'bid': self._safe_float(ticker_data.get('bid1Price', 0)),
+                    'ask': self._safe_float(ticker_data.get('ask1Price', 0)),
+                    'last': self._safe_float(ticker_data.get('lastPrice', 0)),
+                    'timestamp': ticker_data.get('time')
+                }
+                remaining_symbols.discard(symbol)
+                logger.debug(
+                    f"✅ {symbol}: bid={tickers[symbol]['bid']}, ask={tickers[symbol]['ask']} (source={label})"
                 )
-            
-                logger.debug(f"📡 Response for {symbol}: {response.get('retCode')}")
-            
-                if response.get('retCode') == 0 and response.get('result'):
-                    ticker_list = response['result'].get('list', [])
-                    if ticker_list:
-                        ticker_data = ticker_list[0]
-                        tickers[symbol] = {
-                            'bid': self._safe_float(ticker_data.get('bid1Price', 0)),
-                            'ask': self._safe_float(ticker_data.get('ask1Price', 0)),
-                            'last': self._safe_float(ticker_data.get('lastPrice', 0)),
-                            'timestamp': ticker_data.get('time')
-                        }
-                        logger.debug(f"✅ {symbol}: bid={tickers[symbol]['bid']}, ask={tickers[symbol]['ask']}")
-                    else:
-                        logger.debug(f"❌ No data in response for {symbol}")
-                else:
-                    logger.debug(f"❌ API error for {symbol}: {response.get('retMsg')}")
-                    
-            except Exception as e:
-                logger.debug(f"🔥 Exception for {symbol}: {str(e)}")
-    
-        logger.debug(f"📊 Total tickers received (debug): {len(tickers)}")
-        logger.info(f"📊 Получено тикеров: {len(tickers)} из {len(symbols)}")
+
+        # Основной bulk-запрос без параметра symbol
+        try:
+            cursor = None
+            while True:
+                params = {'category': self.market_category}
+                if cursor:
+                    params['cursor'] = cursor
+
+                response = self.session.get_tickers(**params)
+                request_count += 1
+                _extract_from_response(response, 'bulk')
+
+                cursor = response.get('result', {}).get('nextPageCursor') if response else None
+                if not cursor or not remaining_symbols:
+                    break
+
+        except Exception as e:
+            logger.debug(f"🔥 Bulk request failed: {str(e)}")
+
+        # Фолбэк: запрашиваем оставшиеся символы параллельно
+        if remaining_symbols:
+            logger.debug(
+                f"⚙️ Bulk вернул не все данные, догружаем {len(remaining_symbols)} символов параллельно"
+            )
+
+            def _fetch_symbol(symbol):
+                try:
+                    return self.session.get_tickers(category=self.market_category, symbol=symbol)
+                except Exception as exc:
+                    logger.debug(f"🔥 Exception for {symbol}: {str(exc)}")
+                    return None
+
+            with ThreadPoolExecutor(max_workers=min(8, len(remaining_symbols))) as executor:
+                future_to_symbol = {
+                    executor.submit(_fetch_symbol, symbol): symbol for symbol in list(remaining_symbols)
+                }
+
+                for future in as_completed(future_to_symbol):
+                    request_count += 1
+                    symbol = future_to_symbol[future]
+                    response = future.result()
+                    _extract_from_response(response, f'fallback:{symbol}')
+
+        duration = time.time() - start_time
+        logger.debug(
+            f"📊 Total tickers received: {len(tickers)} (requests: {request_count}, missing: {len(remaining_symbols)})"
+        )
+
+        if duration < 2:
+            logger.info(
+                f"⚡️ Сбор {len(tickers)} тикеров занял {duration:.2f} с (меньше 2 секунд, запросов: {request_count})"
+            )
+        else:
+            logger.warning(
+                f"⏱️ Сбор {len(tickers)} тикеров занял {duration:.2f} с (запросов: {request_count})"
+            )
+
         return tickers
         
     def get_balance(self, coin='USDT'):
