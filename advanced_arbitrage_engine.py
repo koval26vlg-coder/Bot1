@@ -766,6 +766,12 @@ class AdvancedArbitrageEngine:
                     'execution_time': execution_time,
                     'market_conditions': opportunity['market_conditions'],
                     'triangle_stats': self.triangle_stats[triangle_name],
+                    'trade_plan': trade_plan,
+                    'results': trade_result.get('results', []),
+                    'total_profit': trade_result.get(
+                        'total_profit',
+                        trade_plan.get('estimated_profit_usdt', 0)
+                    ),
                     'details': {
                         'triangle': opportunity['triangle_name'],
                         'symbols': opportunity['symbols'],
