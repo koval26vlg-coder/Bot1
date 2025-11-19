@@ -38,6 +38,8 @@ class Config:
     }
 
     KNOWN_QUOTES = ['USDT', 'USDC', 'BTC', 'ETH', 'BNB']
+    # Поддерживаемые стартовые валюты для построения треугольников
+    TRADING_BASE_CURRENCIES = ['USDT']
 
     def __init__(self):
         self._triangular_pairs_cache = None
@@ -263,6 +265,13 @@ class Config:
         templates = []
         registered = set()
         base_candidates = self._discover_base_currencies(available_symbols)
+        if self.TRADING_BASE_CURRENCIES:
+            base_candidates = [
+                base for base in base_candidates
+                if base in self.TRADING_BASE_CURRENCIES
+            ]
+        if not base_candidates:
+            return []
 
         for base_currency in base_candidates:
             connected_assets = sorted(self._collect_connected_assets(base_currency, available_symbols))
@@ -351,18 +360,23 @@ class Config:
             if quote:
                 currencies.add(quote)
 
-        preferred_order = [
-            'USDT', 'USDC', 'BTC', 'ETH', 'BNB', 'EUR', 'USD', 'DAI'
-        ]
-
         ordered = []
-        for currency in preferred_order:
-            if currency in currencies:
-                ordered.append(currency)
+        if self.TRADING_BASE_CURRENCIES:
+            for currency in self.TRADING_BASE_CURRENCIES:
+                if currency in currencies:
+                    ordered.append(currency)
+        else:
+            preferred_order = [
+                'USDT', 'USDC', 'BTC', 'ETH', 'BNB', 'EUR', 'USD', 'DAI'
+            ]
 
-        for currency in sorted(currencies):
-            if currency not in ordered:
-                ordered.append(currency)
+            for currency in preferred_order:
+                if currency in currencies:
+                    ordered.append(currency)
+
+            for currency in sorted(currencies):
+                if currency not in ordered:
+                    ordered.append(currency)
 
         result = []
         for currency in ordered:
