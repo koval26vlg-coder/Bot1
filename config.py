@@ -45,6 +45,23 @@ class Config:
         self._available_cross_map_cache = None
         self._symbol_watchlist_cache = None
         self._min_triangular_profit_override = self._load_min_triangular_profit_override()
+        # Настройки динамического ослабления порогов
+        self._empty_cycle_relax_step = self._load_float_env(
+            'EMPTY_CYCLE_RELAX_STEP',
+            0.02 if not self.TESTNET else 0.05
+        )
+        self._empty_cycle_relax_max = self._load_float_env(
+            'EMPTY_CYCLE_RELAX_MAX',
+            0.25 if not self.TESTNET else 0.5
+        )
+        self._min_dynamic_profit_floor = self._load_float_env(
+            'MIN_DYNAMIC_PROFIT_FLOOR',
+            0.02 if not self.TESTNET else 0.0
+        )
+        self._ticker_staleness_warning = self._load_float_env(
+            'TICKER_STALENESS_WARNING_SEC',
+            5.0
+        )
 
     @property
     def MARKET_CATEGORY(self):
@@ -165,6 +182,26 @@ class Config:
         """Сумма для торговли"""
         return self._TRADE_AMOUNT
 
+    @property
+    def EMPTY_CYCLE_RELAX_STEP(self):
+        """Шаг снижения порога прибыли при серии пустых циклов"""
+        return self._empty_cycle_relax_step
+
+    @property
+    def EMPTY_CYCLE_RELAX_MAX(self):
+        """Максимальное снижение порога на фоне отсутствия сделок"""
+        return self._empty_cycle_relax_max
+
+    @property
+    def MIN_DYNAMIC_PROFIT_FLOOR(self):
+        """Абсолютный минимум динамического порога прибыли"""
+        return self._min_dynamic_profit_floor
+
+    @property
+    def TICKER_STALENESS_WARNING_SEC(self):
+        """Максимально допустимая давность котировок перед предупреждением"""
+        return self._ticker_staleness_warning
+
     def _load_min_triangular_profit_override(self):
         """Читает переопределение порога прибыли из переменной окружения"""
         raw_value = os.getenv('MIN_TRIANGULAR_PROFIT')
@@ -188,6 +225,24 @@ class Config:
             return None
 
         return profit_value
+
+    def _load_float_env(self, var_name, default):
+        """Унифицированное чтение числовых параметров окружения"""
+        raw_value = os.getenv(var_name)
+        if raw_value is None:
+            return default
+
+        normalized_value = raw_value.replace(',', '.')
+        try:
+            return float(normalized_value)
+        except ValueError:
+            logger.warning(
+                "Некорректное значение %s='%s'. Используем дефолт %.4f.",
+                var_name,
+                raw_value,
+                default
+            )
+            return default
 
     def _build_triangle_templates(self):
         """Создает список потенциальных треугольников, согласованный с реальными тикерами"""

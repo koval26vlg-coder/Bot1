@@ -38,6 +38,7 @@ class AdvancedArbitrageEngine:
         self.no_opportunity_cycles = 0
         self.aggressive_filter_metrics = defaultdict(int)
         self._last_reported_balance = None
+        self._last_dynamic_threshold = None
         
         # Статистика по треугольникам
         self.triangle_stats = {}
@@ -320,14 +321,25 @@ class AdvancedArbitrageEngine:
 
         # Корректировка в зависимости от количества пустых циклов
         if self.no_opportunity_cycles > 0:
-            empty_cycle_adjustment = -min(self.no_opportunity_cycles * 0.01, 0.05)
+            relax_step = getattr(self.config, 'EMPTY_CYCLE_RELAX_STEP', 0.01)
+            relax_cap = getattr(self.config, 'EMPTY_CYCLE_RELAX_MAX', 0.05)
+            empty_cycle_adjustment = -min(self.no_opportunity_cycles * relax_step, relax_cap)
             dynamic_profit_threshold += empty_cycle_adjustment
             threshold_adjustments.append({
                 'reason': f'{self.no_opportunity_cycles} пустых циклов',
                 'value': empty_cycle_adjustment
             })
 
+        min_dynamic_floor = getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0)
+        if dynamic_profit_threshold < min_dynamic_floor:
+            threshold_adjustments.append({
+                'reason': 'динамический минимум',
+                'value': min_dynamic_floor - dynamic_profit_threshold
+            })
+            dynamic_profit_threshold = min_dynamic_floor
+
         dynamic_profit_threshold = max(0.0, dynamic_profit_threshold)
+        self._last_dynamic_threshold = dynamic_profit_threshold
         rejected_candidates = 0
 
         for triangle in sorted(self.config.TRIANGULAR_PAIRS,
@@ -938,6 +950,11 @@ class AdvancedArbitrageEngine:
             self.aggressive_filter_metrics = defaultdict(int)
 
         aggressive_ops = []
+        last_dynamic_threshold = getattr(self, '_last_dynamic_threshold', None)
+        adaptive_threshold = max(
+            getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
+            last_dynamic_threshold or self.config.MIN_TRIANGULAR_PROFIT
+        )
         sorted_candidates = sorted(
             self._last_candidates,
             key=lambda item: item['best_direction']['profit_percent'],
@@ -967,14 +984,14 @@ class AdvancedArbitrageEngine:
             clamped_raw = max(raw_profit, 0)
             adjusted_profit = clamped_raw + boost
 
-            if adjusted_profit < self.config.MIN_TRIANGULAR_PROFIT:
+            if adjusted_profit < adaptive_threshold:
                 filtered_below_threshold += 1
                 self.aggressive_filter_metrics['below_min_profit_filtered'] += 1
                 logger.debug(
                     "⚠️ Агрессивный кандидат %s отброшен: скорректированная прибыль %.4f%% ниже порога %.4f%%",
                     candidate['triangle_name'],
                     adjusted_profit,
-                    self.config.MIN_TRIANGULAR_PROFIT
+                    adaptive_threshold
                 )
                 continue
 
