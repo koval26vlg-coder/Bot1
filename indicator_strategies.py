@@ -219,9 +219,15 @@ class StrategyManager:
         closes = [float(r['close']) for r in symbol_rows if r.get('close') is not None]
         highs = [float(r['high']) for r in symbol_rows if r.get('high') is not None]
         lows = [float(r['low']) for r in symbol_rows if r.get('low') is not None]
+        opens = [float(r['open']) for r in symbol_rows if r.get('open') is not None]
 
         min_required = 15
-        if len(closes) < min_required or len(highs) < min_required or len(lows) < min_required:
+        if (
+            len(closes) < min_required
+            or len(highs) < min_required
+            or len(lows) < min_required
+            or len(opens) < min_required
+        ):
             readiness = len(closes) / min_required if min_required else 0
             return StrategyResult(
                 name='multi_indicator',
@@ -259,6 +265,24 @@ class StrategyManager:
         score = float(trend_strength + momentum_component * 2)
         confidence = float(min(1.0, (trend_strength / 10) + (momentum_component / 2)))
 
+        pattern = self._detect_candlestick_pattern(opens, highs, lows, closes)
+        if pattern['bias'] == 'bullish':
+            # Поддерживаем бычьи паттерны повышением скора и уверенностью
+            score += pattern['strength']
+            confidence = float(min(1.0, confidence + pattern['strength'] / 2))
+            if signal == 'flat':
+                signal = 'long_bias'
+            elif signal == 'short':
+                signal = 'flat'
+        elif pattern['bias'] == 'bearish':
+            # Медвежьи паттерны уменьшают уверенность и агрессивность
+            score += pattern['strength']
+            confidence = float(max(0.0, confidence - pattern['strength'] / 3))
+            if signal == 'flat':
+                signal = 'short_bias'
+            elif signal == 'long':
+                signal = 'flat'
+
         meta = {
             'rsi': float(rsi),
             'short_ema': float(short_ema),
@@ -266,6 +290,9 @@ class StrategyManager:
             'atr': float(atr),
             'atr_percent': float((atr / closes[-1]) * 100) if closes and closes[-1] else 0.0,
             'trend_strength': float(trend_strength),
+            'pattern_name': pattern['name'],
+            'pattern_bias': pattern['bias'],
+            'pattern_strength': pattern['strength'],
         }
 
         return StrategyResult(
@@ -331,6 +358,57 @@ class StrategyManager:
         if not recent_tr:
             return None
         return mean(recent_tr)
+
+    def _detect_candlestick_pattern(
+        self,
+        opens: Sequence[float],
+        highs: Sequence[float],
+        lows: Sequence[float],
+        closes: Sequence[float],
+    ) -> Dict[str, str | float]:
+        """Определяем базовые свечные паттерны без сторонних библиотек."""
+
+        if min(len(opens), len(highs), len(lows), len(closes)) < 2:
+            return {'name': 'none', 'bias': 'neutral', 'strength': 0.0}
+
+        o2, h2, l2, c2 = opens[-2], highs[-2], lows[-2], closes[-2]
+        o1, h1, l1, c1 = opens[-1], highs[-1], lows[-1], closes[-1]
+
+        body1 = abs(c1 - o1)
+        body2 = abs(c2 - o2)
+        range1 = max(h1 - l1, 1e-9)
+        range2 = max(h2 - l2, 1e-9)
+
+        patterns = []
+
+        # Бычье поглощение
+        if c1 > o1 and c2 < o2 and o1 <= c2 and c1 >= o2:
+            strength = min(0.6, (body1 + body2) / max(body2, 1e-9) * 0.1)
+            patterns.append(('bullish_engulfing', 'bullish', strength))
+
+        # Медвежье поглощение
+        if c1 < o1 and c2 > o2 and o1 >= c2 and c1 <= o2:
+            strength = min(0.6, (body1 + body2) / max(body2, 1e-9) * 0.1)
+            patterns.append(('bearish_engulfing', 'bearish', strength))
+
+        # Молот
+        lower_shadow = o1 - l1 if o1 >= c1 else c1 - l1
+        upper_shadow = h1 - max(o1, c1)
+        if body1 <= range1 * 0.35 and lower_shadow >= body1 * 2 and upper_shadow <= body1:
+            strength = min(0.4, lower_shadow / range1)
+            patterns.append(('hammer', 'bullish', strength))
+
+        # Падающая звезда
+        if body1 <= range1 * 0.35 and upper_shadow >= body1 * 2 and lower_shadow <= body1:
+            strength = min(0.4, upper_shadow / range1)
+            patterns.append(('shooting_star', 'bearish', strength))
+
+        if not patterns:
+            return {'name': 'none', 'bias': 'neutral', 'strength': 0.0}
+
+        # Берём самый сильный паттерн
+        name, bias, strength = max(patterns, key=lambda item: item[2])
+        return {'name': name, 'bias': bias, 'strength': float(strength)}
 
 
 __all__ = ['StrategyManager', 'StrategyResult']

@@ -41,6 +41,48 @@ class MultiIndicatorStrategyTest(unittest.TestCase):
         self.assertGreater(result.meta['short_ema'], result.meta['long_ema'])
         self.assertGreater(result.meta['atr'], 0)
 
+    def test_candlestick_pattern_boosts_score(self):
+        """Проверяем, что свечные паттерны добавляют сигнальную окраску и метаданные."""
+
+        rows = []
+        for idx in range(20):
+            close = 100 + idx * 0.2
+            rows.append({
+                'timestamp': self.base_time + timedelta(minutes=idx),
+                'symbol': 'BTCUSDT',
+                'open': close - 0.1,
+                'high': close + 0.3,
+                'low': close - 0.4,
+                'close': close,
+                'volume': 1000 + idx,
+            })
+
+        rows.append({
+            'timestamp': self.base_time + timedelta(minutes=20),
+            'symbol': 'BTCUSDT',
+            'open': 101.5,
+            'high': 102.0,
+            'low': 100.0,
+            'close': 100.5,
+            'volume': 2000,
+        })
+        rows.append({
+            'timestamp': self.base_time + timedelta(minutes=21),
+            'symbol': 'BTCUSDT',
+            'open': 100.0,
+            'high': 103.5,
+            'low': 99.5,
+            'close': 103.0,
+            'volume': 2500,
+        })
+
+        result = self.manager._multi_indicator_strategy(rows, {'volatility': 0.4, 'liquidity': 8000})
+
+        self.assertEqual(result.meta['pattern_name'], 'bullish_engulfing')
+        self.assertEqual(result.meta['pattern_bias'], 'bullish')
+        self.assertGreater(result.meta['pattern_strength'], 0)
+        self.assertNotEqual(result.signal, 'short')
+
 
 class MultiIndicatorIntegrationTest(unittest.TestCase):
     """Проверяем выбор стратегии и влияние на динамический порог."""
