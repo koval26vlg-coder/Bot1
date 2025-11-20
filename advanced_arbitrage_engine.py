@@ -389,11 +389,11 @@ class AdvancedArbitrageEngine:
                     })
 
             if market_analysis['market_conditions'] == 'high_volatility':
-                dynamic_profit_threshold += 0.1  # Увеличиваем порог при высокой волатильности
-                threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.1})
+                dynamic_profit_threshold += 0.03  # Увеличиваем порог при высокой волатильности
+                threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.03})
             elif market_analysis['market_conditions'] == 'low_volatility':
-                dynamic_profit_threshold -= 0.05  # Уменьшаем порог при низкой волатильности
-                threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.05})
+                dynamic_profit_threshold -= 0.02  # Уменьшаем порог при низкой волатильности
+                threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.02})
 
             # Корректировка по сигналу стратегии
             strategy_adjustment = 0.0
