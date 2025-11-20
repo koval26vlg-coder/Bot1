@@ -1462,11 +1462,10 @@ class AdvancedArbitrageEngine:
         
         last_time = self.last_arbitrage_time[symbol]
         cooldown_elapsed = (datetime.now() - last_time).total_seconds()
-        
+
         if cooldown_elapsed < self.config.COOLDOWN_PERIOD:
             remaining = self.config.COOLDOWN_PERIOD - cooldown_elapsed
-            logger.info(f"⏳ Cooldown active for {symbol}: {remaining:.1f} seconds remaining")
-            self.monitor.track_cooldown_violation(symbol)
+            logger.debug(f"⏳ Cooldown active for {symbol}: {remaining:.1f} seconds remaining")
             return False
 
         return True
