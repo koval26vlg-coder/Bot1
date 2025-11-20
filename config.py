@@ -38,7 +38,7 @@ class Config:
     }
 
     KNOWN_QUOTES = [
-        'USDT', 'USDC', 'BTC', 'ETH', 'BNB',
+        'USDT', 'USDC', 'BUSD', 'BTC', 'ETH', 'BNB',
         # Основные фиатные валюты, встречающиеся на Bybit
         'USD', 'EUR', 'BRL', 'TRY', 'AUD', 'GBP', 'JPY', 'MXN', 'ARS', 'CHF'
     ]
@@ -498,14 +498,37 @@ class Config:
 
     def _split_symbol(self, symbol):
         """Разделяет тикер на базовую и котируемую валюты"""
-        if symbol in self._symbol_details_map:
-            base_coin, quote_coin = self._symbol_details_map[symbol]
+        normalized_symbol = symbol.upper()
+
+        # Проверяем кэш деталей тикеров, если ранее уже разобрали тикер
+        if normalized_symbol in self._symbol_details_map:
+            base_coin, quote_coin = self._symbol_details_map[normalized_symbol]
             if base_coin and quote_coin:
                 return base_coin, quote_coin
 
+        # Перебираем известные котируемые валюты по длине для корректного парсинга составных суффиксов
         for quote in sorted(self.KNOWN_QUOTES, key=len, reverse=True):
-            if symbol.endswith(quote) and len(symbol) > len(quote):
-                return symbol[:-len(quote)], quote
+            if normalized_symbol.endswith(quote) and len(normalized_symbol) > len(quote):
+                base_coin = normalized_symbol[:-len(quote)]
+                # Требуем минимум два символа в базовой валюте
+                if len(base_coin) >= 2:
+                    self._symbol_details_map[normalized_symbol] = (base_coin, quote)
+                    return base_coin, quote
 
-        midpoint = len(symbol) // 2
-        return symbol[:midpoint], symbol[midpoint:]
+        # Отдельно проверяем популярные котируемые валюты, которые могут не попасть в KNOWN_QUOTES
+        popular_quotes = ['USDT', 'USDC', 'BUSD', 'BTC', 'ETH', 'BNB']
+        for quote in popular_quotes:
+            if normalized_symbol.endswith(quote) and len(normalized_symbol) > len(quote):
+                base_coin = normalized_symbol[:-len(quote)]
+                if len(base_coin) >= 2:
+                    self._symbol_details_map[normalized_symbol] = (base_coin, quote)
+                    return base_coin, quote
+
+        # Резервное разбиение пополам используется только когда других вариантов нет
+        midpoint = len(normalized_symbol) // 2
+        base_coin, quote_coin = normalized_symbol[:midpoint], normalized_symbol[midpoint:]
+        if len(base_coin) >= 2 and len(quote_coin) >= 1:
+            self._symbol_details_map[normalized_symbol] = (base_coin, quote_coin)
+            return base_coin, quote_coin
+
+        return None, None
