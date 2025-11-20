@@ -51,10 +51,17 @@ def setup_logging():
     return logger
 
 
-def log_market_snapshot(engine, max_symbols=3):
+def log_market_snapshot(engine, max_symbols=None):
     """Выводит несколько актуальных котировок bid/ask для наглядности"""
     if not hasattr(engine, 'last_tickers'):
         return
+
+    # Определяем количество отображаемых символов с учетом конфигурации
+    if max_symbols is None:
+        if hasattr(engine, 'config') and hasattr(engine.config, 'MARKET_SNAPSHOT_SYMBOLS'):
+            max_symbols = engine.config.MARKET_SNAPSHOT_SYMBOLS
+        else:
+            max_symbols = 3
 
     tickers = getattr(engine, 'last_tickers', {})
     if not tickers:
@@ -64,9 +71,21 @@ def log_market_snapshot(engine, max_symbols=3):
     logger.info("📈 Текущие котировки (bid/ask):")
     for symbol in sorted(tickers.keys())[:max_symbols]:
         data = tickers[symbol]
-        bid = data.get('bid', 0)
-        ask = data.get('ask', 0)
-        logger.info(f"   {symbol}: bid={bid:.6f}, ask={ask:.6f}")
+        bid = data.get('bid')
+        ask = data.get('ask')
+
+        if bid is None or ask is None:
+            logger.info(f"   {symbol}: данные bid/ask отсутствуют")
+            continue
+
+        if bid <= 0 or ask <= 0:
+            logger.info(f"   {symbol}: bid={bid}, ask={ask} (некорректные значения для расчета спреда)")
+            continue
+
+        spread_percent = ((ask - bid) / ((ask + bid) / 2)) * 100 if (ask + bid) > 0 else 0
+        logger.info(
+            f"   {symbol}: bid={bid:.6f}, ask={ask:.6f}, спред={spread_percent:.4f}%"
+        )
 
 class GracefulKiller:
     """Обработчик сигналов для graceful shutdown"""
