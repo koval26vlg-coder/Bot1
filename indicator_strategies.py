@@ -19,6 +19,7 @@ class StrategyResult:
     signal: str
     score: float
     confidence: float
+    meta: Optional[Dict[str, float]] = None
 
 
 class StrategyManager:
@@ -30,6 +31,7 @@ class StrategyManager:
         self._strategies: Dict[str, Callable[[Sequence[dict], Dict[str, float]], StrategyResult]] = {
             'volatility_adaptive': self._volatility_adaptive_strategy,
             'momentum_bias': self._momentum_bias_strategy,
+            'multi_indicator': self._multi_indicator_strategy,
         }
 
     def evaluate(self, market_df: Sequence[dict], context: Dict[str, float]) -> Optional[StrategyResult]:
@@ -148,6 +150,145 @@ class StrategyManager:
             score=score,
             confidence=confidence,
         )
+
+    def _multi_indicator_strategy(
+        self,
+        market_df: Sequence[dict],
+        context: Dict[str, float]
+    ) -> StrategyResult:
+        """Комбинирует RSI, EMA и ATR для оценки импульса и риска."""
+
+        rows_by_symbol = defaultdict(list)
+        for row in market_df:
+            symbol = row.get('symbol', 'default')
+            rows_by_symbol[symbol].append(row)
+
+        if not rows_by_symbol:
+            return StrategyResult(
+                name='multi_indicator',
+                signal='wait_for_data',
+                score=0.0,
+                confidence=0.0,
+                meta={},
+            )
+
+        # Берем самый заполненный набор, чтобы избежать смены символов на коротких сериях
+        symbol_rows = max(rows_by_symbol.values(), key=len)
+        closes = [float(r['close']) for r in symbol_rows if r.get('close') is not None]
+        highs = [float(r['high']) for r in symbol_rows if r.get('high') is not None]
+        lows = [float(r['low']) for r in symbol_rows if r.get('low') is not None]
+
+        min_required = 15
+        if len(closes) < min_required or len(highs) < min_required or len(lows) < min_required:
+            readiness = len(closes) / min_required if min_required else 0
+            return StrategyResult(
+                name='multi_indicator',
+                signal='wait_for_data',
+                score=float(readiness * 0.4),
+                confidence=float(min(0.25, readiness / 3)),
+                meta={},
+            )
+
+        rsi = self._calculate_rsi(closes)
+        short_ema = self._calculate_ema(closes, period=9)
+        long_ema = self._calculate_ema(closes, period=21)
+        atr = self._calculate_atr(highs, lows, closes)
+
+        if long_ema is None or short_ema is None or rsi is None or atr is None:
+            return StrategyResult(
+                name='multi_indicator',
+                signal='wait_for_data',
+                score=0.0,
+                confidence=0.0,
+                meta={},
+            )
+
+        ema_diff = short_ema - long_ema
+        trend_strength = abs(ema_diff) / long_ema * 100 if long_ema else 0.0
+        momentum_component = abs(rsi - 50) / 50
+
+        if rsi > 60 and short_ema > long_ema:
+            signal = 'long'
+        elif rsi < 40 and short_ema < long_ema:
+            signal = 'short'
+        else:
+            signal = 'flat'
+
+        score = float(trend_strength + momentum_component * 2)
+        confidence = float(min(1.0, (trend_strength / 10) + (momentum_component / 2)))
+
+        meta = {
+            'rsi': float(rsi),
+            'short_ema': float(short_ema),
+            'long_ema': float(long_ema),
+            'atr': float(atr),
+            'atr_percent': float((atr / closes[-1]) * 100) if closes and closes[-1] else 0.0,
+            'trend_strength': float(trend_strength),
+        }
+
+        return StrategyResult(
+            name='multi_indicator',
+            signal=signal,
+            score=score,
+            confidence=confidence,
+            meta=meta,
+        )
+
+    def _calculate_rsi(self, closes: Sequence[float], period: int = 14) -> Optional[float]:
+        """Простой расчёт RSI без сторонних библиотек."""
+
+        if len(closes) < period + 1:
+            return None
+
+        gains = []
+        losses = []
+        for prev, curr in zip(closes[-(period + 1):-1], closes[-period:]):
+            change = curr - prev
+            if change > 0:
+                gains.append(change)
+            else:
+                losses.append(abs(change))
+
+        avg_gain = mean(gains) if gains else 0.0
+        avg_loss = mean(losses) if losses else 0.0
+
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    def _calculate_ema(self, closes: Sequence[float], period: int) -> Optional[float]:
+        """Экспоненциальное среднее с инициализацией от простого среднего."""
+
+        if len(closes) < period:
+            return None
+
+        multiplier = 2 / (period + 1)
+        ema = mean(closes[:period])
+        for price in closes[period:]:
+            ema = (price - ema) * multiplier + ema
+        return float(ema)
+
+    def _calculate_atr(self, highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int = 14) -> Optional[float]:
+        """ATR на основе истинного диапазона."""
+
+        if not (len(highs) == len(lows) == len(closes)):
+            return None
+        if len(closes) < period + 1:
+            return None
+
+        true_ranges = []
+        for i in range(1, len(closes)):
+            high = highs[i]
+            low = lows[i]
+            prev_close = closes[i - 1]
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            true_ranges.append(tr)
+
+        recent_tr = true_ranges[-period:]
+        if not recent_tr:
+            return None
+        return mean(recent_tr)
 
 
 __all__ = ['StrategyManager', 'StrategyResult']

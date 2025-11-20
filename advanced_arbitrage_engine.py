@@ -263,7 +263,8 @@ class AdvancedArbitrageEngine:
 
         market_context = {
             'volatility': float(volatility) if volatility is not None else 0.0,
-            'liquidity': float(liquidity)
+            'liquidity': float(liquidity),
+            'prepared_market': market_data,
         }
 
         strategy_result = self.strategy_manager.evaluate(market_data, market_context)
@@ -320,6 +321,36 @@ class AdvancedArbitrageEngine:
                     'reason': f'сигнал стратегии {signal}',
                     'value': strategy_adjustment
                 })
+
+            if getattr(strategy_result, 'name', '') == 'multi_indicator':
+                extended_bias_map = {
+                    'long': -0.05,
+                    'short': 0.05,
+                    'flat': 0.01,
+                }
+                bias_shift = extended_bias_map.get(signal, 0.0) * (1 + confidence)
+                dynamic_profit_threshold += bias_shift
+                threshold_adjustments.append({
+                    'reason': f'мульти-индикаторный сигнал {signal}',
+                    'value': bias_shift
+                })
+
+                meta = getattr(strategy_result, 'meta', {}) or {}
+                atr_percent = meta.get('atr_percent', 0.0)
+                if atr_percent > 1:
+                    atr_adjustment = min(0.08, 0.02 * atr_percent)
+                    dynamic_profit_threshold += atr_adjustment
+                    threshold_adjustments.append({
+                        'reason': 'высокий ATR',
+                        'value': atr_adjustment
+                    })
+                elif atr_percent < 0.4 and signal == 'long':
+                    atr_adjustment = -0.015 * (1 + confidence)
+                    dynamic_profit_threshold += atr_adjustment
+                    threshold_adjustments.append({
+                        'reason': 'низкий ATR, подтверждение импульса',
+                        'value': atr_adjustment
+                    })
 
         # Корректировка в зависимости от количества пустых циклов
         if self.no_opportunity_cycles > 0:
