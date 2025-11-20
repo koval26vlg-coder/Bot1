@@ -50,6 +50,7 @@ class Config:
         self._available_symbols_cache = None
         self._available_cross_map_cache = None
         self._symbol_watchlist_cache = None
+        self._symbol_details_map = {}
         self._min_triangular_profit_override = self._load_min_triangular_profit_override()
         # Настройки динамического ослабления порогов
         self._empty_cycle_relax_step = self._load_float_env(
@@ -447,11 +448,21 @@ class Config:
             response.raise_for_status()
             data = response.json()
             if data.get('retCode') == 0:
-                symbols = {
-                    item['symbol']
-                    for item in data.get('result', {}).get('list', [])
-                    if item.get('symbol')
-                }
+                self._symbol_details_map = {}
+                symbols = set()
+
+                for item in data.get('result', {}).get('list', []):
+                    symbol = item.get('symbol')
+                    base_coin = item.get('baseCoin')
+                    quote_coin = item.get('quoteCoin')
+
+                    if not symbol:
+                        continue
+
+                    symbols.add(symbol)
+                    if base_coin and quote_coin:
+                        self._symbol_details_map[symbol] = (base_coin.upper(), quote_coin.upper())
+
                 self._available_symbols_cache = symbols
                 logger.info(
                     "Получено %s тикеров для категории %s", len(symbols), self.MARKET_CATEGORY
@@ -487,6 +498,11 @@ class Config:
 
     def _split_symbol(self, symbol):
         """Разделяет тикер на базовую и котируемую валюты"""
+        if symbol in self._symbol_details_map:
+            base_coin, quote_coin = self._symbol_details_map[symbol]
+            if base_coin and quote_coin:
+                return base_coin, quote_coin
+
         for quote in sorted(self.KNOWN_QUOTES, key=len, reverse=True):
             if symbol.endswith(quote) and len(symbol) > len(quote):
                 return symbol[:-len(quote)], quote
