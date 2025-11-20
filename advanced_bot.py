@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import Config
+from optimized_config import OptimizedConfig
 from advanced_arbitrage_engine import AdvancedArbitrageEngine
 
 logger = logging.getLogger(__name__)
@@ -32,14 +32,14 @@ def ensure_psutil_available():
 def setup_logging():
     """Настройка расширенного логгирования"""
     logger = logging.getLogger()
-    logger.setLevel(getattr(logging, Config().LOG_LEVEL, 'INFO'))
+    logger.setLevel(getattr(logging, OptimizedConfig().LOG_LEVEL, 'INFO'))
     
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
     )
     
     # Файловый обработчик
-    file_handler = logging.FileHandler(Config().LOG_FILE)
+    file_handler = logging.FileHandler(OptimizedConfig().LOG_FILE)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     
@@ -102,7 +102,8 @@ def main():
     """Основная функция запуска улучшенного бота"""
     global logger
     logger = setup_logging()
-    config = Config()
+    # Используем оптимизированные параметры для тестовой среды
+    config = OptimizedConfig()
     
     logger.info("=" * 70)
     logger.info("🚀 ADVANCED TRIANGULAR ARBITRAGE BOT STARTING 🚀")
