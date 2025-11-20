@@ -62,6 +62,9 @@ class MultiIndicatorIntegrationTest(unittest.TestCase):
                 'bids': deque(maxlen=500),
                 'asks': deque(maxlen=500),
                 'spreads': deque(maxlen=500),
+                'raw_spreads': deque(maxlen=500),
+                'bid_volumes': deque(maxlen=500),
+                'ask_volumes': deque(maxlen=500),
             }
         }
         self.engine.volatility_data = {
