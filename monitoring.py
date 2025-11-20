@@ -278,15 +278,30 @@ class AdvancedMonitor:
         """Экспорт истории сделок"""
         if not self.trade_history:
             return False
-        
+
         if filename is None:
             filename = f"trade_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        
+
+        def _convert_datetime_values(value):
+            if isinstance(value, datetime):
+                return value.isoformat()
+            if isinstance(value, dict):
+                return {k: _convert_datetime_values(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_convert_datetime_values(item) for item in value]
+            return value
+
+        def _prepare_trade_plan(trade_plan):
+            if not trade_plan:
+                return {}
+            prepared = _convert_datetime_values(trade_plan)
+            return prepared if isinstance(prepared, dict) else {'value': prepared}
+
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = ['timestamp', 'symbol', 'side', 'amount', 'price', 'profit', 'simulated', 'trade_details']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
+
                 writer.writeheader()
                 
                 for trade in self.trade_history:
@@ -320,7 +335,10 @@ class AdvancedMonitor:
                             'price': result.get('avgPrice', result.get('price', 0)),
                             'profit': trade.get('total_profit', 0) if result == results[-1] else 0,
                             'simulated': trade.get('simulated', False),
-                            'trade_details': json.dumps(trade.get('trade_plan', {}))
+                            'trade_details': json.dumps(
+                                _prepare_trade_plan(trade.get('trade_plan', {})),
+                                default=str
+                            )
                         })
             
             logger.info(f"✅ Trade history exported to {filename}")
