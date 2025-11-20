@@ -1402,12 +1402,19 @@ class AdvancedArbitrageEngine:
 
         return success
 
+    def get_effective_balance(self, coin='USDT'):
+        """Прокси-метод для получения баланса с учётом симуляции"""
+        if getattr(self.real_trader, 'simulation_mode', False):
+            return self.real_trader.get_balance(coin)
+
+        return self.client.get_balance(coin)
+
     def _fetch_actual_balance(self, coin='USDT'):
         """Возвращает нормализованный баланс с обработкой ошибок."""
         default_balance = {'available': 0.0, 'total': 0.0, 'coin': coin}
 
         try:
-            balance = self.client.get_balance(coin)
+            balance = self.get_effective_balance(coin)
             if not isinstance(balance, dict):
                 raise ValueError('Некорректный формат ответа баланса')
         except Exception as exc:

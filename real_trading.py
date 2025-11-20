@@ -64,7 +64,9 @@ class RealTradingExecutor:
         self.is_real_mode = False
         self.trade_history = []
         self.risk_manager = RiskManager()
-        
+        # Фиктивный баланс для симуляции, чтобы можно было управлять проверками ликвидности
+        self._simulated_balance_usdt = self._load_simulated_balance()
+
         # Режим симуляции (True = симуляция, False = реальные ордера)
         simulation_override = os.getenv('SIMULATION_MODE')
         if simulation_override is not None:
@@ -105,6 +107,27 @@ class RealTradingExecutor:
             return self._simulate_trade(trade_plan)
         else:
             return self._execute_real_trade(trade_plan)
+
+    def get_balance(self, coin='USDT'):
+        """Возвращает баланс в зависимости от режима исполнения"""
+        if self.simulation_mode:
+            return {
+                'available': self._simulated_balance_usdt,
+                'total': self._simulated_balance_usdt,
+                'coin': coin
+            }
+
+        return self.client.get_balance(coin)
+
+    def _load_simulated_balance(self):
+        """Загружает виртуальный баланс из окружения либо использует дефолт"""
+        env_balance = os.getenv('SIMULATION_BALANCE_USDT')
+
+        try:
+            return float(env_balance) if env_balance is not None else 100.0
+        except (TypeError, ValueError):
+            logger.warning("⚠️ Некорректное значение SIMULATION_BALANCE_USDT, используем 100.0 USDT")
+            return 100.0
     
     def _simulate_trade(self, trade_plan):
         """Симуляция торговли"""

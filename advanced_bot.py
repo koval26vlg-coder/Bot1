@@ -136,8 +136,8 @@ def main():
                 logger.info(f"🕐 Running for: {str(datetime.now() - start_time).split('.')[0]}")
             
             try:
-                # Получение баланса
-                balance = engine.client.get_balance('USDT')
+                # Получение баланса с учетом режима симуляции
+                balance = engine.get_effective_balance('USDT')
                 balance_usdt = balance['available']
                 
                 if iteration_count % 10 == 0:
@@ -157,7 +157,11 @@ def main():
                     best_opportunity = opportunities[0]  # Уже отсортированы по прибыльности
                     
                     # Дополнительные проверки для лучшей возможности
-                    if (balance_usdt > config.TRADE_AMOUNT * 0.5 and 
+                    balance_check_passed = balance_usdt > config.TRADE_AMOUNT * 0.5
+                    if engine.real_trader.simulation_mode:
+                        balance_check_passed = True
+
+                    if (balance_check_passed and
                         engine.check_cooldown(best_opportunity['triangle_name'])):
                         
                         logger.info(f"⭐ Selected: {best_opportunity['triangle_name']} - "
