@@ -285,8 +285,14 @@ class AdvancedArbitrageEngine:
             'orderbook_imbalance': micro['orderbook_imbalance'],
         }
 
-        strategy_result = self.strategy_manager.evaluate(market_data, market_context)
-        self.last_strategy_context = market_context
+        # Сохраняем рассчитанный микроструктурный контекст для последующих решений
+        self.last_strategy_context = {
+            **market_context,
+            'average_spread_percent': micro['average_spread_percent'],
+            'orderbook_imbalance': micro['orderbook_imbalance'],
+        }
+
+        strategy_result = self.strategy_manager.evaluate(market_data, self.last_strategy_context)
 
         if strategy_result:
             logger.info(
@@ -320,6 +326,33 @@ class AdvancedArbitrageEngine:
                 'reason': 'рыночный спред',
                 'value': spread_adjustment
             })
+
+        safe_strategy_context = getattr(self, 'last_strategy_context', {}) or {}
+        context_spread = safe_strategy_context.get('average_spread_percent') if isinstance(safe_strategy_context, dict) else None
+        if context_spread is not None:
+            context_spread_adjustment = 0.0
+            if context_spread > 1.0:
+                context_spread_adjustment = min(0.08, context_spread / 120)
+            elif context_spread < 0.25:
+                context_spread_adjustment = -0.03
+
+            if context_spread_adjustment:
+                dynamic_profit_threshold += context_spread_adjustment
+                threshold_adjustments.append({
+                    'reason': 'средний спред контекста',
+                    'value': context_spread_adjustment
+                })
+
+        context_imbalance = safe_strategy_context.get('orderbook_imbalance') if isinstance(safe_strategy_context, dict) else None
+        if context_imbalance is not None:
+            imbalance_strength = abs(context_imbalance)
+            if imbalance_strength > 0.2:
+                imbalance_adjustment = -0.02 * min(1.5, 1 + imbalance_strength)
+                dynamic_profit_threshold += imbalance_adjustment
+                threshold_adjustments.append({
+                    'reason': 'дисбаланс стакана',
+                    'value': imbalance_adjustment
+                })
 
         if market_analysis['market_conditions'] == 'high_volatility':
             dynamic_profit_threshold += 0.1  # Увеличиваем порог при высокой волатильности
