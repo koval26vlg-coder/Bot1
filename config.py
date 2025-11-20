@@ -165,6 +165,8 @@ class Config:
     # Настройки логгирования
     LOG_FILE = 'triangular_arbitrage_bot.log'
     LOG_LEVEL = 'INFO'
+    # Количество выводимых котировок в снапшоте рынка
+    MARKET_SNAPSHOT_SYMBOLS = int(os.getenv('MARKET_SNAPSHOT_SYMBOLS', '3'))
     
     # Настройки кулдауна
     COOLDOWN_PERIOD = 180  # 3 минуты между сделками для одного треугольника
