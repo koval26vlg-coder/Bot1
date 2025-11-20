@@ -816,19 +816,38 @@ class AdvancedArbitrageEngine:
 
     def _check_liquidity(self, triangle, tickers):
         """Проверка ликвидности для треугольника"""
+        spread_limit = 50 if self.config.TESTNET else self.config.MAX_SPREAD_PERCENT
+
         for symbol in triangle['legs']:
             if symbol not in tickers:
+                logger.warning(
+                    "Пропускаем треугольник %s из-за отсутствия тикера %s",
+                    triangle['name'],
+                    symbol
+                )
                 return False
-            
+
             bid, ask = tickers[symbol]['bid'], tickers[symbol]['ask']
             if bid <= 0 or ask <= 0:
+                logger.warning(
+                    "Пропускаем тикер %s из-за нулевых значений: bid=%s, ask=%s",
+                    symbol,
+                    bid,
+                    ask
+                )
                 return False
-            
+
             # Проверка спреда
             spread = ((ask - bid) / bid) * 100
-            if spread > self.config.MAX_SPREAD_PERCENT:
+            if spread > spread_limit:
+                logger.debug(
+                    "Слишком широкий спред для %s: %.2f%% (лимит %.2f%%)",
+                    symbol,
+                    spread,
+                    spread_limit
+                )
                 return False
-        
+
         return True
 
     def _check_triangle_volatility(self, triangle):
