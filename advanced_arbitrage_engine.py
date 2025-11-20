@@ -314,125 +314,165 @@ class AdvancedArbitrageEngine:
         self._last_market_analysis = market_analysis
         self._last_candidates = []
 
-        # Динамический порог прибыли в зависимости от внешних факторов
-        base_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
-        dynamic_profit_threshold = base_profit_threshold
-        threshold_adjustments = []
+        # Динамический порог прибыли с отдельной веткой для тестнета
+        rejected_candidates = 0
+        rejected_by_profit = 0
+        rejected_by_liquidity = 0
+        rejected_by_volatility = 0
 
-        spread_adjustment = self._calculate_spread_adjustment(tickers)
-        if spread_adjustment != 0:
-            dynamic_profit_threshold += spread_adjustment
-            threshold_adjustments.append({
-                'reason': 'рыночный спред',
-                'value': spread_adjustment
-            })
+        if getattr(self.config, 'TESTNET', False):
+            base_profit_threshold = 0.02
+            dynamic_profit_threshold = base_profit_threshold
+            threshold_adjustments = []
 
-        safe_strategy_context = getattr(self, 'last_strategy_context', {}) or {}
-        context_spread = safe_strategy_context.get('average_spread_percent') if isinstance(safe_strategy_context, dict) else None
-        if context_spread is not None:
-            context_spread_adjustment = 0.0
-            if context_spread > 1.0:
-                context_spread_adjustment = min(0.08, context_spread / 120)
-            elif context_spread < 0.25:
-                context_spread_adjustment = -0.03
+            # Упрощенные корректировки для тестовой среды
+            spread_adjustment = min(0.02, (market_analysis.get('average_spread_percent', 0) or 0) / 150)
+            if spread_adjustment:
+                dynamic_profit_threshold += spread_adjustment
+                threshold_adjustments.append({'reason': 'средний спред', 'value': spread_adjustment})
 
-            if context_spread_adjustment:
-                dynamic_profit_threshold += context_spread_adjustment
+            if market_analysis['market_conditions'] == 'high_volatility':
+                dynamic_profit_threshold += 0.01
+                threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.01})
+            elif market_analysis['market_conditions'] == 'low_volatility':
+                dynamic_profit_threshold -= 0.005
+                threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.005})
+
+            if self.no_opportunity_cycles:
+                relax = -min(0.03, self.no_opportunity_cycles * 0.005)
+                dynamic_profit_threshold += relax
+                threshold_adjustments.append({'reason': 'накопленные пустые циклы', 'value': relax})
+
+            min_dynamic_floor = max(0.0, getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0))
+            if dynamic_profit_threshold < min_dynamic_floor:
+                threshold_adjustments.append({'reason': 'нижняя граница тестнета', 'value': min_dynamic_floor - dynamic_profit_threshold})
+                dynamic_profit_threshold = min_dynamic_floor
+        else:
+            # Динамический порог прибыли в зависимости от внешних факторов (боевой режим)
+            base_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
+            dynamic_profit_threshold = base_profit_threshold
+            threshold_adjustments = []
+
+            spread_adjustment = self._calculate_spread_adjustment(tickers)
+            if spread_adjustment != 0:
+                dynamic_profit_threshold += spread_adjustment
                 threshold_adjustments.append({
-                    'reason': 'средний спред контекста',
-                    'value': context_spread_adjustment
+                    'reason': 'рыночный спред',
+                    'value': spread_adjustment
                 })
 
-        context_imbalance = safe_strategy_context.get('orderbook_imbalance') if isinstance(safe_strategy_context, dict) else None
-        if context_imbalance is not None:
-            imbalance_strength = abs(context_imbalance)
-            if imbalance_strength > 0.2:
-                imbalance_adjustment = -0.02 * min(1.5, 1 + imbalance_strength)
-                dynamic_profit_threshold += imbalance_adjustment
-                threshold_adjustments.append({
-                    'reason': 'дисбаланс стакана',
-                    'value': imbalance_adjustment
-                })
+            safe_strategy_context = getattr(self, 'last_strategy_context', {}) or {}
+            context_spread = safe_strategy_context.get('average_spread_percent') if isinstance(safe_strategy_context, dict) else None
+            if context_spread is not None:
+                context_spread_adjustment = 0.0
+                if context_spread > 1.0:
+                    context_spread_adjustment = min(0.08, context_spread / 120)
+                elif context_spread < 0.25:
+                    context_spread_adjustment = -0.03
 
-        if market_analysis['market_conditions'] == 'high_volatility':
-            dynamic_profit_threshold += 0.1  # Увеличиваем порог при высокой волатильности
-            threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.1})
-        elif market_analysis['market_conditions'] == 'low_volatility':
-            dynamic_profit_threshold -= 0.05  # Уменьшаем порог при низкой волатильности
-            threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.05})
+                if context_spread_adjustment:
+                    dynamic_profit_threshold += context_spread_adjustment
+                    threshold_adjustments.append({
+                        'reason': 'средний спред контекста',
+                        'value': context_spread_adjustment
+                    })
 
-        # Корректировка по сигналу стратегии
-        strategy_adjustment = 0.0
-        if strategy_result:
-            signal = (strategy_result.signal or '').lower()
-            confidence = getattr(strategy_result, 'confidence', 0) or 0
-            confidence = max(0.0, min(1.0, confidence))
-            strategy_bias_map = {
-                'increase_risk': -0.04,
-                'long_bias': -0.03,
-                'reduce_risk': 0.04,
-                'short_bias': 0.03
-            }
-            if signal in strategy_bias_map:
-                strategy_adjustment = strategy_bias_map[signal] * (1 + confidence)
-                dynamic_profit_threshold += strategy_adjustment
-                threshold_adjustments.append({
-                    'reason': f'сигнал стратегии {signal}',
-                    'value': strategy_adjustment
-                })
+            context_imbalance = safe_strategy_context.get('orderbook_imbalance') if isinstance(safe_strategy_context, dict) else None
+            if context_imbalance is not None:
+                imbalance_strength = abs(context_imbalance)
+                if imbalance_strength > 0.2:
+                    imbalance_adjustment = -0.02 * min(1.5, 1 + imbalance_strength)
+                    dynamic_profit_threshold += imbalance_adjustment
+                    threshold_adjustments.append({
+                        'reason': 'дисбаланс стакана',
+                        'value': imbalance_adjustment
+                    })
 
-            if getattr(strategy_result, 'name', '') == 'multi_indicator':
-                extended_bias_map = {
-                    'long': -0.05,
-                    'short': 0.05,
-                    'flat': 0.01,
+            if market_analysis['market_conditions'] == 'high_volatility':
+                dynamic_profit_threshold += 0.1  # Увеличиваем порог при высокой волатильности
+                threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.1})
+            elif market_analysis['market_conditions'] == 'low_volatility':
+                dynamic_profit_threshold -= 0.05  # Уменьшаем порог при низкой волатильности
+                threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.05})
+
+            # Корректировка по сигналу стратегии
+            strategy_adjustment = 0.0
+            if strategy_result:
+                signal = (strategy_result.signal or '').lower()
+                confidence = getattr(strategy_result, 'confidence', 0) or 0
+                confidence = max(0.0, min(1.0, confidence))
+                strategy_bias_map = {
+                    'increase_risk': -0.04,
+                    'long_bias': -0.03,
+                    'reduce_risk': 0.04,
+                    'short_bias': 0.03
                 }
-                bias_shift = extended_bias_map.get(signal, 0.0) * (1 + confidence)
-                dynamic_profit_threshold += bias_shift
+                if signal in strategy_bias_map:
+                    strategy_adjustment = strategy_bias_map[signal] * (1 + confidence)
+                    dynamic_profit_threshold += strategy_adjustment
+                    threshold_adjustments.append({
+                        'reason': f'сигнал стратегии {signal}',
+                        'value': strategy_adjustment
+                    })
+
+                if getattr(strategy_result, 'name', '') == 'multi_indicator':
+                    extended_bias_map = {
+                        'long': -0.05,
+                        'short': 0.05,
+                        'flat': 0.01,
+                    }
+                    bias_shift = extended_bias_map.get(signal, 0.0) * (1 + confidence)
+                    dynamic_profit_threshold += bias_shift
+                    threshold_adjustments.append({
+                        'reason': f'мульти-индикаторный сигнал {signal}',
+                        'value': bias_shift
+                    })
+
+                    meta = getattr(strategy_result, 'meta', {}) or {}
+                    atr_percent = meta.get('atr_percent', 0.0)
+                    if atr_percent > 1:
+                        atr_adjustment = min(0.08, 0.02 * atr_percent)
+                        dynamic_profit_threshold += atr_adjustment
+                        threshold_adjustments.append({
+                            'reason': 'высокий ATR',
+                            'value': atr_adjustment
+                        })
+                    elif atr_percent < 0.4 and signal == 'long':
+                        atr_adjustment = -0.015 * (1 + confidence)
+                        dynamic_profit_threshold += atr_adjustment
+                        threshold_adjustments.append({
+                            'reason': 'низкий ATR, подтверждение импульса',
+                            'value': atr_adjustment
+                        })
+
+            # Корректировка в зависимости от количества пустых циклов
+            if self.no_opportunity_cycles > 0:
+                relax_step = getattr(self.config, 'EMPTY_CYCLE_RELAX_STEP', 0.01)
+                relax_cap = getattr(self.config, 'EMPTY_CYCLE_RELAX_MAX', 0.05)
+                empty_cycle_adjustment = -min(self.no_opportunity_cycles * relax_step, relax_cap)
+                dynamic_profit_threshold += empty_cycle_adjustment
                 threshold_adjustments.append({
-                    'reason': f'мульти-индикаторный сигнал {signal}',
-                    'value': bias_shift
+                    'reason': f'{self.no_opportunity_cycles} пустых циклов',
+                    'value': empty_cycle_adjustment
                 })
 
-                meta = getattr(strategy_result, 'meta', {}) or {}
-                atr_percent = meta.get('atr_percent', 0.0)
-                if atr_percent > 1:
-                    atr_adjustment = min(0.08, 0.02 * atr_percent)
-                    dynamic_profit_threshold += atr_adjustment
-                    threshold_adjustments.append({
-                        'reason': 'высокий ATR',
-                        'value': atr_adjustment
-                    })
-                elif atr_percent < 0.4 and signal == 'long':
-                    atr_adjustment = -0.015 * (1 + confidence)
-                    dynamic_profit_threshold += atr_adjustment
-                    threshold_adjustments.append({
-                        'reason': 'низкий ATR, подтверждение импульса',
-                        'value': atr_adjustment
-                    })
-
-        # Корректировка в зависимости от количества пустых циклов
-        if self.no_opportunity_cycles > 0:
-            relax_step = getattr(self.config, 'EMPTY_CYCLE_RELAX_STEP', 0.01)
-            relax_cap = getattr(self.config, 'EMPTY_CYCLE_RELAX_MAX', 0.05)
-            empty_cycle_adjustment = -min(self.no_opportunity_cycles * relax_step, relax_cap)
-            dynamic_profit_threshold += empty_cycle_adjustment
-            threshold_adjustments.append({
-                'reason': f'{self.no_opportunity_cycles} пустых циклов',
-                'value': empty_cycle_adjustment
-            })
-
-        min_dynamic_floor = getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0)
-        if dynamic_profit_threshold < min_dynamic_floor:
-            threshold_adjustments.append({
-                'reason': 'динамический минимум',
-                'value': min_dynamic_floor - dynamic_profit_threshold
-            })
-            dynamic_profit_threshold = min_dynamic_floor
+            min_dynamic_floor = getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0)
+            if dynamic_profit_threshold < min_dynamic_floor:
+                threshold_adjustments.append({
+                    'reason': 'динамический минимум',
+                    'value': min_dynamic_floor - dynamic_profit_threshold
+                })
+                dynamic_profit_threshold = min_dynamic_floor
 
         dynamic_profit_threshold = max(0.0, dynamic_profit_threshold)
         self._last_dynamic_threshold = dynamic_profit_threshold
-        rejected_candidates = 0
+        logger.info(
+            "Выбран порог прибыли %.4f%% (базовый %.4f%%, тестнет=%s, корректировки=%d)",
+            dynamic_profit_threshold,
+            base_profit_threshold,
+            getattr(self.config, 'TESTNET', False),
+            len(threshold_adjustments),
+        )
 
         for triangle in sorted(self.config.TRIANGULAR_PAIRS,
                              key=lambda x: x.get('priority', 999)):
@@ -444,10 +484,12 @@ class AdvancedArbitrageEngine:
                 
                 # Проверяем ликвидность
                 if not self._check_liquidity(triangle, tickers):
+                    rejected_by_liquidity += 1
                     continue
-                
+
                 # Проверяем волатильность треугольника
                 if not self._check_triangle_volatility(triangle):
+                    rejected_by_volatility += 1
                     continue
                 
                 leg1, leg2, leg3 = triangle['legs']
@@ -464,9 +506,18 @@ class AdvancedArbitrageEngine:
                     self._calculate_direction(prices, triangle, 2),
                     self._calculate_direction(prices, triangle, 3)
                 ]
-                
+
+                # Фильтрация явных ошибок построения пути
+                valid_directions = [
+                    d for d in directions
+                    if d.get('path') and d.get('profit_percent', -100) > -90
+                ]
+                if not valid_directions:
+                    rejected_candidates += 1
+                    continue
+
                 # Выбираем лучшее направление
-                best_direction = max(directions, key=lambda x: x['profit_percent'])
+                best_direction = max(valid_directions, key=lambda x: x['profit_percent'])
                 self._last_candidates.append({
                     'triangle': triangle,
                     'triangle_name': triangle_name,
@@ -507,14 +558,24 @@ class AdvancedArbitrageEngine:
 
                 else:
                     rejected_candidates += 1
+                    rejected_by_profit += 1
 
             except Exception as e:
                 logger.error(f"Error in triangle {triangle_name}: {str(e)}")
 
-        # Сортировка по прибыльности и приоритету
-        opportunities.sort(key=lambda x: (x['profit_percent'], -x['priority']), reverse=True)
+        # Сортировка по прибыльности
+        opportunities.sort(key=lambda x: x['profit_percent'], reverse=True)
 
         total_candidates = len(self._last_candidates)
+        logger.info(
+            "Итоги отбора: кандидатов=%d, принято=%d, отклонено=%d (прибыль=%d, ликвидность=%d, волатильность=%d)",
+            total_candidates,
+            len(opportunities),
+            rejected_candidates,
+            rejected_by_profit,
+            rejected_by_liquidity,
+            rejected_by_volatility,
+        )
         if hasattr(self, 'monitor') and hasattr(self.monitor, 'log_profit_threshold'):
             self.monitor.log_profit_threshold(
                 final_threshold=dynamic_profit_threshold,
