@@ -307,28 +307,66 @@ class RealTradingExecutor:
         """Экспорт истории сделок"""
         import csv
         import json
-        
+
         if filename is None:
             filename = f"trade_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        
+
+        def _convert_datetime_values(value):
+            if isinstance(value, datetime):
+                return value.isoformat()
+            if isinstance(value, dict):
+                return {k: _convert_datetime_values(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_convert_datetime_values(item) for item in value]
+            return value
+
+        def _prepare_trade_plan(trade_plan):
+            if not trade_plan:
+                return {}
+            prepared = _convert_datetime_values(trade_plan)
+            return prepared if isinstance(prepared, dict) else {'value': prepared}
+
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = ['timestamp', 'symbol', 'side', 'amount', 'price', 'profit', 'simulated', 'trade_details']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
+
                 writer.writeheader()
-                
+
                 for trade in self.trade_history:
-                    for result in trade.get('results', []):
+                    results = trade.get('results') or []
+
+                    if not results:
+                        details = trade.get('details', {})
+                        symbols = details.get('symbols') or trade.get('symbol') or ''
+                        if isinstance(symbols, (list, tuple)):
+                            symbols = ','.join(symbols)
+                        results = [{
+                            'symbol': symbols,
+                            'side': details.get('direction', trade.get('direction', '')),
+                            'qty': details.get('initial_amount', 0),
+                            'price': details.get('price', 0)
+                        }]
+
+                    for result in results:
+                        timestamp = trade['timestamp']
+                        if hasattr(timestamp, 'strftime'):
+                            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                        else:
+                            timestamp_str = str(timestamp)
+
                         writer.writerow({
-                            'timestamp': trade['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
+                            'timestamp': timestamp_str,
                             'symbol': result.get('symbol', ''),
                             'side': result.get('side', ''),
                             'amount': result.get('qty', result.get('cumExecQty', 0)),
                             'price': result.get('avgPrice', result.get('price', 0)),
-                            'profit': trade.get('total_profit', 0) if result == trade['results'][-1] else 0,
+                            'profit': trade.get('total_profit', 0) if result == results[-1] else 0,
                             'simulated': trade.get('simulated', False),
-                            'trade_details': json.dumps(trade.get('trade_plan', {}))
+                            'trade_details': json.dumps(
+                                _prepare_trade_plan(trade.get('trade_plan', {})),
+                                default=str
+                            )
                         })
             
             logger.info(f"✅ Trade history exported to {filename}")
