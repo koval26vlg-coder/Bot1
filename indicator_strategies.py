@@ -32,6 +32,7 @@ class StrategyManager:
             'volatility_adaptive': self._volatility_adaptive_strategy,
             'momentum_bias': self._momentum_bias_strategy,
             'multi_indicator': self._multi_indicator_strategy,
+            'orderbook_balance': self._orderbook_balance_strategy,
         }
 
     def evaluate(self, market_df: Sequence[dict], context: Dict[str, float]) -> Optional[StrategyResult]:
@@ -71,8 +72,12 @@ class StrategyManager:
 
         volatility = context.get('volatility', 0.0)
         liquidity = context.get('liquidity', 0.0)
+        spread = context.get('average_spread_percent', 0.0)
 
-        if volatility > 1.5:
+        if spread > 1.0:
+            signal = 'reduce_risk'
+            score = max(0.1, 1.8 - spread)
+        elif volatility > 1.5:
             signal = 'reduce_risk'
             score = max(0.1, 2.5 - volatility)
         elif volatility < 0.3 and liquidity > 0:
@@ -82,12 +87,49 @@ class StrategyManager:
             signal = 'neutral'
             score = 1.0
 
-        confidence = float(min(1.0, abs(volatility - 1.0) / 2))
+        confidence_anchor = abs(volatility - 1.0) / 2
+        confidence_spread = min(1.0, max(0.0, (1.0 - spread)))
+        confidence = float(min(1.0, (confidence_anchor + confidence_spread) / 2))
         return StrategyResult(
             name='volatility_adaptive',
             signal=signal,
             score=float(score),
             confidence=confidence,
+        )
+
+    def _orderbook_balance_strategy(
+        self,
+        market_df: Sequence[dict],
+        context: Dict[str, float]
+    ) -> StrategyResult:
+        """Использует средний спред и дисбаланс стакана для оценки риска."""
+
+        spread = context.get('average_spread_percent', 0.0)
+        imbalance = context.get('orderbook_imbalance', 0.0)
+
+        if spread > 1.2:
+            signal = 'reduce_risk'
+            base_score = max(0.1, 2 - spread)
+        elif abs(imbalance) > 0.25 and spread < 0.6:
+            signal = 'long_bias' if imbalance > 0 else 'short_bias'
+            base_score = 1.5 + abs(imbalance)
+        elif spread < 0.25:
+            signal = 'increase_risk'
+            base_score = 1.2 + (0.3 - spread)
+        else:
+            signal = 'neutral'
+            base_score = 1.0
+
+        confidence = float(min(1.0, max(0.0, (1 - spread)) + abs(imbalance)))
+        return StrategyResult(
+            name='orderbook_balance',
+            signal=signal,
+            score=float(base_score),
+            confidence=confidence,
+            meta={
+                'average_spread_percent': float(spread),
+                'orderbook_imbalance': float(imbalance),
+            },
         )
 
     def _momentum_bias_strategy(

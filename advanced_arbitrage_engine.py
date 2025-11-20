@@ -74,7 +74,10 @@ class AdvancedArbitrageEngine:
                 'timestamps': deque(maxlen=500),
                 'bids': deque(maxlen=500),
                 'asks': deque(maxlen=500),
-                'spreads': deque(maxlen=500)
+                'spreads': deque(maxlen=500),
+                'raw_spreads': deque(maxlen=500),
+                'bid_volumes': deque(maxlen=500),
+                'ask_volumes': deque(maxlen=500)
             }
             self.volatility_data[symbol] = {
                 'short_term': deque(maxlen=50),
@@ -106,16 +109,21 @@ class AdvancedArbitrageEngine:
                 continue
 
             bid, ask = data['bid'], data['ask']
+            bid_volume = data.get('bid_size') or data.get('bid_qty') or data.get('bid_volume') or data.get('bidVol') or data.get('bidVol24h') or 0
+            ask_volume = data.get('ask_size') or data.get('ask_qty') or data.get('ask_volume') or data.get('askVol') or data.get('askVol24h') or 0
 
             # Обновление истории цен
             self.price_history[symbol]['timestamps'].append(current_time)
             self.price_history[symbol]['bids'].append(bid)
             self.price_history[symbol]['asks'].append(ask)
+            self.price_history[symbol]['bid_volumes'].append(float(bid_volume))
+            self.price_history[symbol]['ask_volumes'].append(float(ask_volume))
 
             # Расчет спреда
             if bid > 0 and ask > 0:
-                spread = ((ask - bid) / bid) * 100
-                self.price_history[symbol]['spreads'].append(spread)
+                spread_percent = ((ask - bid) / bid) * 100
+                self.price_history[symbol]['spreads'].append(spread_percent)
+                self.price_history[symbol]['raw_spreads'].append(ask - bid)
 
             # Обновление волатильности
             mid_price = (bid + ask) / 2
@@ -145,7 +153,9 @@ class AdvancedArbitrageEngine:
         market_analysis = {
             'overall_volatility': 0,
             'best_triangles': [],
-            'market_conditions': 'normal'
+            'market_conditions': 'normal',
+            'average_spread_percent': 0.0,
+            'orderbook_imbalance': 0.0
         }
         
         volatilities = []
@@ -156,7 +166,11 @@ class AdvancedArbitrageEngine:
 
         if volatilities:
             market_analysis['overall_volatility'] = mean(volatilities)
-        
+
+        micro = self._calculate_microstructure_metrics()
+        market_analysis['average_spread_percent'] = micro['average_spread_percent']
+        market_analysis['orderbook_imbalance'] = micro['orderbook_imbalance']
+
         # Определение рыночных условий
         if market_analysis['overall_volatility'] > 2:
             market_analysis['market_conditions'] = 'high_volatility'
@@ -261,10 +275,14 @@ class AdvancedArbitrageEngine:
         liquidity_values = [row['volume'] for row in market_data[-50:] if row['volume'] is not None]
         liquidity = mean(liquidity_values)
 
+        micro = self._calculate_microstructure_metrics()
+
         market_context = {
             'volatility': float(volatility) if volatility is not None else 0.0,
             'liquidity': float(liquidity),
             'prepared_market': market_data,
+            'average_spread_percent': micro['average_spread_percent'],
+            'orderbook_imbalance': micro['orderbook_imbalance'],
         }
 
         strategy_result = self.strategy_manager.evaluate(market_data, market_context)
@@ -294,6 +312,14 @@ class AdvancedArbitrageEngine:
         base_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
         dynamic_profit_threshold = base_profit_threshold
         threshold_adjustments = []
+
+        spread_adjustment = self._calculate_spread_adjustment(tickers)
+        if spread_adjustment != 0:
+            dynamic_profit_threshold += spread_adjustment
+            threshold_adjustments.append({
+                'reason': 'рыночный спред',
+                'value': spread_adjustment
+            })
 
         if market_analysis['market_conditions'] == 'high_volatility':
             dynamic_profit_threshold += 0.1  # Увеличиваем порог при высокой волатильности
@@ -466,6 +492,55 @@ class AdvancedArbitrageEngine:
                 total_candidates=total_candidates
             )
         return opportunities
+
+    def _calculate_microstructure_metrics(self, window: int = 20):
+        """Подсчет среднего спреда и дисбаланса стакана на коротком окне."""
+        spreads = []
+        imbalances = []
+
+        for symbol, history in self.price_history.items():
+            if history['spreads']:
+                spreads.extend(list(history['spreads'])[-window:])
+
+            bid_vols = list(history.get('bid_volumes', []))[-window:]
+            ask_vols = list(history.get('ask_volumes', []))[-window:]
+            for bid_vol, ask_vol in zip(bid_vols, ask_vols):
+                total = bid_vol + ask_vol
+                if total > 0:
+                    imbalances.append((bid_vol - ask_vol) / total)
+
+        avg_spread = mean(spreads) if spreads else 0.0
+        avg_imbalance = mean(imbalances) if imbalances else 0.0
+
+        return {
+            'average_spread_percent': float(avg_spread),
+            'orderbook_imbalance': float(avg_imbalance)
+        }
+
+    def _calculate_spread_adjustment(self, tickers):
+        """Корректировка порога прибыли в зависимости от среднего спреда ног."""
+        spreads = []
+        for triangle in self.config.TRIANGULAR_PAIRS:
+            legs = triangle['legs']
+            if all(leg in tickers for leg in legs):
+                for leg in legs:
+                    data = tickers[leg]
+                    bid = data.get('bid', 0)
+                    ask = data.get('ask', 0)
+                    if bid > 0 and ask > 0:
+                        spreads.append(((ask - bid) / bid) * 100)
+
+        if not spreads:
+            return 0.0
+
+        avg_spread = mean(spreads)
+
+        # Чем шире средний спред, тем жестче должен быть порог, и наоборот
+        if avg_spread > 1.0:
+            return min(0.1, avg_spread / 100)
+        if avg_spread < 0.2:
+            return -0.05
+        return 0.0
 
     def _calculate_direction(self, prices, triangle, direction):
         """Расчет прибыли для конкретного направления"""
