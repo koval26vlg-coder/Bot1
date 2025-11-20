@@ -457,7 +457,7 @@ class AdvancedArbitrageEngine:
                     }
                     
                     historical_success = self.triangle_stats[triangle_name]['success_rate']
-                    if historical_success > 0.7:  # Повышаем приоритет успешных треугольников␊
+                    if historical_success > 0.7:  # Повышаем приоритет успешных треугольников
                         opportunity['profit_percent'] += 0.0
 
                     opportunities.append(opportunity)
@@ -750,8 +750,8 @@ class AdvancedArbitrageEngine:
 
         if volatilities:
             avg_volatility = mean(volatilities)
-            # Фильтруем слишком волатильные треугольники␊
-            return avg_volatility < 5.0  # Максимум 5% волатильность␊
+            # Фильтруем слишком волатильные треугольники
+            return avg_volatility < 5.0  # Максимум 5% волатильность
         
         return True
 
