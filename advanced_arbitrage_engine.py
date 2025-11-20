@@ -629,36 +629,95 @@ class AdvancedArbitrageEngine:
         current_asset = base_currency
         path = []
         remaining_symbols = list(legs_sequence)
+        max_iterations = len(remaining_symbols) * 3 or 3
+        iterations = 0
 
-        while remaining_symbols:
+        while remaining_symbols and iterations < max_iterations:
             step_found = False
+            iterations += 1
 
             for symbol in list(remaining_symbols):
                 base_cur, quote_cur = self._get_symbol_currencies(symbol)
+
+                logger.debug(
+                    f"Текущая валюта: {current_asset}, рассматриваем символ {symbol}"
+                )
 
                 if current_asset == quote_cur:
                     path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
                     current_asset = base_cur
                     remaining_symbols.remove(symbol)
                     step_found = True
+                    logger.debug(
+                        f"Добавлен шаг покупки {symbol}, новая валюта {current_asset}, осталось {len(remaining_symbols)} символов"
+                    )
                     break
                 if current_asset == base_cur:
                     path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
                     current_asset = quote_cur
                     remaining_symbols.remove(symbol)
                     step_found = True
+                    logger.debug(
+                        f"Добавлен шаг продажи {symbol}, новая валюта {current_asset}, осталось {len(remaining_symbols)} символов"
+                    )
                     break
 
             if not step_found:
+                logger.debug(
+                    f"Не удалось подобрать шаг с текущей валютой {current_asset}, пытаемся аварийный шаг"
+                )
+
+                fallback_symbol = None
+                fallback_side = None
+                fallback_next_asset = None
+
+                for symbol in list(remaining_symbols):
+                    base_cur, quote_cur = self._get_symbol_currencies(symbol)
+                    if base_cur == base_currency:
+                        fallback_symbol = symbol
+                        fallback_side = 'Sell'
+                        fallback_next_asset = quote_cur
+                        break
+                    if quote_cur == base_currency:
+                        fallback_symbol = symbol
+                        fallback_side = 'Buy'
+                        fallback_next_asset = base_cur
+                        break
+
+                if fallback_symbol:
+                    path.append({
+                        'symbol': fallback_symbol,
+                        'side': fallback_side,
+                        'price_type': 'bid' if fallback_side == 'Sell' else 'ask'
+                    })
+                    remaining_symbols.remove(fallback_symbol)
+                    current_asset = fallback_next_asset
+                    logger.debug(
+                        f"Аварийно добавлен шаг {fallback_side} для {fallback_symbol}, новая валюта {current_asset}, осталось {len(remaining_symbols)} символов"
+                    )
+                    continue
+
                 logger.warning(
                     f"Невозможно построить путь для {triangle_name} (направление {direction}): "
                     f"текущая валюта {current_asset} не совпадает ни с одной котируемой валютой"
                 )
                 return None
 
+        if iterations >= max_iterations and remaining_symbols:
+            logger.warning(
+                f"Превышен лимит итераций при построении пути для {triangle_name} (направление {direction})"
+            )
+            return None
+
         if current_asset != base_currency:
             logger.warning(
                 f"Путь для {triangle_name} (направление {direction}) не возвращает базовую валюту {base_currency}"
+            )
+            return None
+
+        if remaining_symbols:
+            logger.warning(
+                f"Путь для {triangle_name} (направление {direction}) построен не полностью, осталось {len(remaining_symbols)} символов"
             )
             return None
 
