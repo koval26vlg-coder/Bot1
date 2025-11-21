@@ -320,10 +320,26 @@ class AdvancedArbitrageEngine:
         rejected_by_liquidity = 0
         rejected_by_volatility = 0
 
+        fee_rate = getattr(self.config, 'TRADING_FEE', 0)
+        commission_buffer = max(0.0, fee_rate * 3 * 100)
+        slippage_buffer = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+        volatility_component = max(0.0, market_analysis.get('overall_volatility', 0) or 0)
+        volatility_buffer = min(
+            0.2,
+            volatility_component * getattr(self.config, 'VOLATILITY_PROFIT_MULTIPLIER', 0.05)
+        )
+
         if getattr(self.config, 'TESTNET', False):
             base_profit_threshold = 0.02
             dynamic_profit_threshold = base_profit_threshold
             threshold_adjustments = []
+
+            dynamic_profit_threshold += commission_buffer
+            threshold_adjustments.append({'reason': 'комиссии цикла', 'value': commission_buffer})
+
+            if slippage_buffer:
+                dynamic_profit_threshold += slippage_buffer
+                threshold_adjustments.append({'reason': 'запас на проскальзывание', 'value': slippage_buffer})
 
             # Упрощенные корректировки для тестовой среды
             spread_adjustment = min(0.02, (market_analysis.get('average_spread_percent', 0) or 0) / 150)
@@ -343,7 +359,14 @@ class AdvancedArbitrageEngine:
                 dynamic_profit_threshold += relax
                 threshold_adjustments.append({'reason': 'накопленные пустые циклы', 'value': relax})
 
-            min_dynamic_floor = max(0.0, getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0))
+            if volatility_buffer:
+                dynamic_profit_threshold += volatility_buffer
+                threshold_adjustments.append({'reason': 'реальная волатильность', 'value': volatility_buffer})
+
+            min_dynamic_floor = max(
+                getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
+                getattr(self.config, 'MIN_TRIANGULAR_PROFIT', 0.0) + commission_buffer + slippage_buffer
+            )
             if dynamic_profit_threshold < min_dynamic_floor:
                 threshold_adjustments.append({'reason': 'нижняя граница тестнета', 'value': min_dynamic_floor - dynamic_profit_threshold})
                 dynamic_profit_threshold = min_dynamic_floor
@@ -352,6 +375,19 @@ class AdvancedArbitrageEngine:
             base_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
             dynamic_profit_threshold = base_profit_threshold
             threshold_adjustments = []
+
+            dynamic_profit_threshold += commission_buffer
+            threshold_adjustments.append({
+                'reason': 'комиссии цикла',
+                'value': commission_buffer
+            })
+
+            if slippage_buffer:
+                dynamic_profit_threshold += slippage_buffer
+                threshold_adjustments.append({
+                    'reason': 'запас на проскальзывание',
+                    'value': slippage_buffer
+                })
 
             spread_adjustment = self._calculate_spread_adjustment(tickers)
             if spread_adjustment != 0:
@@ -394,6 +430,13 @@ class AdvancedArbitrageEngine:
             elif market_analysis['market_conditions'] == 'low_volatility':
                 dynamic_profit_threshold -= 0.02  # Уменьшаем порог при низкой волатильности
                 threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.02})
+
+            if volatility_buffer:
+                dynamic_profit_threshold += volatility_buffer
+                threshold_adjustments.append({
+                    'reason': 'реальная волатильность',
+                    'value': volatility_buffer
+                })
 
             # Корректировка по сигналу стратегии
             strategy_adjustment = 0.0
@@ -456,7 +499,10 @@ class AdvancedArbitrageEngine:
                     'value': empty_cycle_adjustment
                 })
 
-            min_dynamic_floor = getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0)
+            min_dynamic_floor = max(
+                getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
+                self.config.MIN_TRIANGULAR_PROFIT + commission_buffer + slippage_buffer
+            )
             if dynamic_profit_threshold < min_dynamic_floor:
                 threshold_adjustments.append({
                     'reason': 'динамический минимум',
