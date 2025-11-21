@@ -1,4 +1,5 @@
 import logging
+import time
 from collections import defaultdict, deque
 from datetime import datetime
 from itertools import permutations
@@ -1085,10 +1086,79 @@ class AdvancedArbitrageEngine:
     def execute_triangular_arbitrage(self, opportunity, trade_plan):
         """Выполнение треугольного арбитража с улучшенным отслеживанием"""
         logger.info(f"🔺 Executing triangular arbitrage: {opportunity['triangle_name']}")
-        
+
         start_time = datetime.now()
-        
+
         try:
+            depth_levels = getattr(self.config, 'ORDERBOOK_DEPTH_LEVELS', 5)
+            protective_spread = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+            max_wait_seconds = getattr(self.config, 'MAX_TRIANGLE_EXECUTION_TIME', 30)
+
+            def _collect_orderbooks():
+                """Запрашивает стаканы для всех ног пути"""
+                books = {}
+                for step in opportunity['execution_path']:
+                    symbol = step['symbol']
+                    if symbol not in books:
+                        books[symbol] = self.client.get_order_book(symbol, depth_levels)
+                return books
+
+            def _validate_liquidity(order_books):
+                """Проверяет доступный объем и пересчитывает безопасные цены"""
+                for i, step in enumerate(opportunity['execution_path']):
+                    plan_key = f"step{i+1}"
+                    order_details = trade_plan.get(plan_key)
+                    if not order_details:
+                        logger.warning("Отсутствуют детали шага %s для проверки ликвидности", plan_key)
+                        return False
+
+                    book = order_books.get(step['symbol'], {})
+                    side_levels = book.get('asks' if order_details['side'] == 'Buy' else 'bids', [])
+                    if not side_levels:
+                        logger.debug("Пустой стакан для %s", step['symbol'])
+                        return False
+
+                    required_amount = order_details['amount']
+                    available_amount = 0
+                    best_price = side_levels[0].get('price', 0)
+
+                    for level in side_levels:
+                        available_amount += max(0.0, level.get('size', 0))
+                        if available_amount >= required_amount:
+                            break
+
+                    if available_amount < required_amount or best_price <= 0:
+                        logger.debug(
+                            "Недостаточный объем на верхних уровнях %s: требуется %.6f, доступно %.6f",
+                            step['symbol'],
+                            required_amount,
+                            available_amount
+                        )
+                        return False
+
+                    adjusted_price = (
+                        best_price * (1 + protective_spread)
+                        if order_details['side'] == 'Buy'
+                        else best_price * (1 - protective_spread)
+                    )
+                    trade_plan[plan_key]['price'] = adjusted_price
+
+                return True
+
+            while True:
+                order_books = _collect_orderbooks()
+
+                if _validate_liquidity(order_books):
+                    logger.debug("Стаканы подтверждены, цены обновлены защитным спредом")
+                    break
+
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if elapsed > max_wait_seconds:
+                    logger.warning("⏳ Прерываем исполнение треугольника из-за истечения лимита ожидания стаканов")
+                    return False
+
+                time.sleep(0.5)
+
             # Проверяем, не изменились ли условия
             current_tickers = self.client.get_tickers(opportunity['symbols'])
             if not self._validate_opportunity_still_exists(opportunity, current_tickers):
