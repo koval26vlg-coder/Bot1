@@ -179,6 +179,46 @@ class BybitClient:
                 len(tickers),
                 self.config.TICKER_STALENESS_WARNING_SEC
             )
+
+    def get_order_book(self, symbol, depth=5):
+        """Возвращает стакан для инструмента с указанной глубиной"""
+        try:
+            response = self.session.get_orderbook(
+                category=self.market_category,
+                symbol=symbol,
+                limit=depth
+            )
+
+            if response.get('retCode') != 0 or 'result' not in response:
+                logger.debug(
+                    "Не удалось получить стакан для %s: %s",
+                    symbol,
+                    response.get('retMsg') if isinstance(response, dict) else 'unknown error'
+                )
+                return {'bids': [], 'asks': []}
+
+            orderbook = response['result']
+            bids = orderbook.get('b', [])
+            asks = orderbook.get('a', [])
+
+            # Форматируем в удобный вид: список словарей с price/size
+            def _normalize(side):
+                normalized = []
+                for level in side:
+                    if len(level) < 2:
+                        continue
+                    price = self._safe_float(level[0])
+                    size = self._safe_float(level[1])
+                    normalized.append({'price': price, 'size': size})
+                return normalized
+
+            return {
+                'bids': _normalize(bids),
+                'asks': _normalize(asks)
+            }
+        except Exception as exc:
+            logger.debug("Ошибка при получении стакана %s: %s", symbol, str(exc))
+            return {'bids': [], 'asks': []}
         
     def get_balance(self, coin='USDT'):
         """Получение баланса для конкретной монеты - исправленная версия для тестнета"""

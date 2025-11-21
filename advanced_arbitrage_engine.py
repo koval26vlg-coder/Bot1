@@ -878,6 +878,17 @@ class AdvancedArbitrageEngine:
     def _check_liquidity(self, triangle, tickers):
         """Проверка ликвидности для треугольника"""
         spread_limit = 50 if self.config.TESTNET else self.config.MAX_SPREAD_PERCENT
+        depth_levels = getattr(self.config, 'ORDERBOOK_DEPTH_LEVELS', 5)
+        max_impact = getattr(self.config, 'MAX_ORDERBOOK_IMPACT', 0.25)
+        planned_amount = getattr(self.config, 'TRADE_AMOUNT', 0) or self.config.MIN_LIQUIDITY
+
+        # Проверяем глубокую ликвидность по каждому плечу
+        def _depth_value(levels):
+            # Суммируем денежный объём верхних уровней стакана
+            return sum(
+                max(0.0, level.get('price', 0)) * max(0.0, level.get('size', 0))
+                for level in levels[:depth_levels]
+            )
 
         for symbol in triangle['legs']:
             if symbol not in tickers:
@@ -906,6 +917,30 @@ class AdvancedArbitrageEngine:
                     symbol,
                     spread,
                     spread_limit
+                )
+                return False
+
+            # Получаем стакан и оцениваем глубину
+            order_book = self.client.get_order_book(symbol, depth_levels)
+            total_bid_value = _depth_value(order_book.get('bids', []))
+            total_ask_value = _depth_value(order_book.get('asks', []))
+            available_liquidity = min(total_bid_value, total_ask_value)
+
+            if available_liquidity < self.config.MIN_LIQUIDITY:
+                logger.debug(
+                    "Недостаточная ликвидность в стакане %s: доступно %.2f USDT (порог %.2f)",
+                    symbol,
+                    available_liquidity,
+                    self.config.MIN_LIQUIDITY
+                )
+                return False
+
+            if planned_amount > available_liquidity * max_impact:
+                logger.debug(
+                    "Планируемый объем %.2f USDT превышает допустимую долю стакана %.2f%% для %s",
+                    planned_amount,
+                    max_impact * 100,
+                    symbol
                 )
                 return False
 
