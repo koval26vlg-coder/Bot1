@@ -6,6 +6,9 @@ from config import Config
 class OptimizedConfig(Config):
     """Конфигурация с более агрессивными параметрами для тестовой среды."""
 
+    # Ограничиваем количество треугольников для ускоренного режима поиска
+    ACCELERATED_TRIANGLE_LIMIT = 50
+
     @property
     def MIN_TRIANGULAR_PROFIT(self):
         """Пониженный порог прибыли для ускоренного поиска сделок в тестнете."""

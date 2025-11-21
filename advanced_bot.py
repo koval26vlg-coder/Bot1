@@ -102,14 +102,19 @@ def main():
     """Основная функция запуска улучшенного бота"""
     global logger
     logger = setup_logging()
-    # Используем оптимизированные параметры для тестовой среды
+    # Используем оптимизированные параметры и явно включаем тестнет для безопасных прогонов
     config = OptimizedConfig()
-    
+    config.TESTNET = True  # Принудительный перевод в тестнет
+
     logger.info("=" * 70)
     logger.info("🚀 ADVANCED TRIANGULAR ARBITRAGE BOT STARTING 🚀")
-    logger.info(f"🔧 Testnet mode: {config.TESTNET}")
+    logger.info(f"🔧 Принудительный режим тестнета: {config.TESTNET}")
+    logger.info(f"💰 Минимальный порог прибыли для ускоренного поиска: {config.MIN_TRIANGULAR_PROFIT}%")
+    logger.info(
+        "🧭 Ограничение на количество треугольников в ускоренном режиме: "
+        f"{getattr(config, 'ACCELERATED_TRIANGLE_LIMIT', 0)}"
+    )
     logger.info(f"📈 Monitoring {len(config.TRIANGULAR_PAIRS)} triangular pairs")
-    logger.info(f"💰 Min profit threshold: {config.MIN_TRIANGULAR_PROFIT}%")
     logger.info(f"⚖️  Trade amount: {config.TRADE_AMOUNT} USDT")
     logger.info(f"🛡️  Max daily trades: {config.MAX_DAILY_TRADES}")
     logger.info(f"⏰ Update interval: {config.UPDATE_INTERVAL} seconds")
