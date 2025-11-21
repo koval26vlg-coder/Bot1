@@ -190,8 +190,8 @@ class AdvancedMonitor:
     def track_cooldown_violation(self, symbol):
         """Отслеживание нарушений кулдауна"""
         self.cooldown_violations += 1
-        if self.cooldown_violations >= 5:  # 5 нарушений подряд
-            logger.critical(
+        if self.cooldown_violations >= 10:  # 10 нарушений подряд
+            logger.warning(
                 f"Множественные нарушения кулдауна:\n"
                 f"Количество нарушений: {self.cooldown_violations}\n"
                 f"Символ: {symbol}\n"
