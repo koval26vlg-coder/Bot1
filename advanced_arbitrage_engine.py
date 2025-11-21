@@ -7,6 +7,7 @@ from itertools import permutations
 from bybit_client import BybitClient
 from config import Config
 from monitoring import AdvancedMonitor
+from performance_optimizer import PerformanceOptimizer
 from real_trading import RealTradingExecutor
 # Импортируем менеджер стратегий напрямую из локального модуля без пакета strategies
 from indicator_strategies import StrategyManager
@@ -23,6 +24,7 @@ class AdvancedArbitrageEngine:
         self.monitor = AdvancedMonitor(self)
         self.real_trader = RealTradingExecutor()
         self.strategy_manager = StrategyManager(self.config)
+        self.performance_optimizer = PerformanceOptimizer(self.config)
 
         # Расширенные структуры данных
         self.price_history = {}
@@ -41,6 +43,7 @@ class AdvancedArbitrageEngine:
         self._last_reported_balance = None
         self._last_dynamic_threshold = None
         self._quote_suffix_cache = None
+        self.optimized_triangles = []
         
         # Статистика по треугольникам
         self.triangle_stats = {}
@@ -59,6 +62,9 @@ class AdvancedArbitrageEngine:
 
         # Инициализация всех символов
         self._initialize_symbols()
+
+        # Предварительная оптимизация списка треугольников
+        self.optimized_triangles = self.performance_optimizer.get_optimized_triangles()
         
         self.monitor.start_monitoring_loop()
         logger.info("🚀 Advanced Triangular Arbitrage Engine initialized")
@@ -331,7 +337,7 @@ class AdvancedArbitrageEngine:
         )
 
         if getattr(self.config, 'TESTNET', False):
-            base_profit_threshold = 0.02
+            base_profit_threshold = 0.05
             dynamic_profit_threshold = base_profit_threshold
             threshold_adjustments = []
 
@@ -366,14 +372,14 @@ class AdvancedArbitrageEngine:
 
             min_dynamic_floor = max(
                 getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
-                getattr(self.config, 'MIN_TRIANGULAR_PROFIT', 0.0) + commission_buffer + slippage_buffer
+                base_profit_threshold + commission_buffer + slippage_buffer
             )
             if dynamic_profit_threshold < min_dynamic_floor:
                 threshold_adjustments.append({'reason': 'нижняя граница тестнета', 'value': min_dynamic_floor - dynamic_profit_threshold})
                 dynamic_profit_threshold = min_dynamic_floor
         else:
             # Динамический порог прибыли в зависимости от внешних факторов (боевой режим)
-            base_profit_threshold = self.config.MIN_TRIANGULAR_PROFIT
+            base_profit_threshold = 0.08
             dynamic_profit_threshold = base_profit_threshold
             threshold_adjustments = []
 
@@ -502,7 +508,7 @@ class AdvancedArbitrageEngine:
 
             min_dynamic_floor = max(
                 getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
-                self.config.MIN_TRIANGULAR_PROFIT + commission_buffer + slippage_buffer
+                base_profit_threshold + commission_buffer + slippage_buffer
             )
             if dynamic_profit_threshold < min_dynamic_floor:
                 threshold_adjustments.append({
@@ -521,8 +527,15 @@ class AdvancedArbitrageEngine:
             len(threshold_adjustments),
         )
 
-        for triangle in sorted(self.config.TRIANGULAR_PAIRS,
-                             key=lambda x: x.get('priority', 999)):
+        prioritized_triangles = self.performance_optimizer.get_optimized_triangles()
+        quick_filtered_triangles = self.performance_optimizer.parallel_check_liquidity(
+            prioritized_triangles,
+            tickers
+        )
+        self.optimized_triangles = quick_filtered_triangles
+        rejected_by_liquidity += max(0, len(prioritized_triangles) - len(quick_filtered_triangles))
+
+        for triangle in quick_filtered_triangles:
             triangle_name = triangle.get('name', 'triangle')
             try:
                 # Проверяем доступность всех пар
