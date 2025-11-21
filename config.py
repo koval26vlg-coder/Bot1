@@ -139,10 +139,12 @@ class Config:
     
     @property
     def MIN_TRIANGULAR_PROFIT(self):
-        """Динамический порог прибыли для тестнета"""
+        """Порог прибыли для треугольного арбитража (приоритет у MIN_TRIANGULAR_PROFIT)."""
         if self._min_triangular_profit_override is not None:
             return self._min_triangular_profit_override
-        return 0.05 if self.TESTNET else 0.15
+        # Базовый дефолт: для тестнета используем более консервативные 0.10,
+        # для продакшена повышаем порог до 0.18+ чтобы отсеивать шум.
+        return 0.10 if self.TESTNET else 0.18
     
     @property
     def UPDATE_INTERVAL(self):
