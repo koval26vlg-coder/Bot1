@@ -234,11 +234,19 @@ class RealTradingExecutor:
     def _calculate_real_profit(self, results, trade_plan):
         """Расчет реальной прибыли на основе исполненных ордеров"""
         try:
+            initial_amount = float(trade_plan.get('initial_amount', 0))
+            if initial_amount <= 0:
+                logger.warning("⚠️ Стартовый капитал не задан или некорректен, расчёт прибыли невозможен")
+                return 0
+
+            if any(order.get('simulated') for order in results):
+                return float(trade_plan.get('estimated_profit_usdt', 0))
+
             base_currency = trade_plan.get('base_currency', 'USDT')
             fee_rate = getattr(self.config, 'TRADING_FEE', 0)
 
             # Инициализируем балансы: стартуем только с базовой валюты
-            balances = {base_currency: float(trade_plan.get('initial_amount', 0))}
+            balances = {base_currency: initial_amount}
 
             for order in results:
                 symbol = order.get('symbol') or ''
@@ -265,7 +273,9 @@ class RealTradingExecutor:
                 else:
                     logger.warning("⚠️ Неизвестная сторона сделки при расчёте прибыли")
 
-            return balances.get(base_currency, 0) - float(trade_plan.get('initial_amount', 0))
+            real_profit = balances.get(base_currency, 0) - initial_amount
+            trade_plan['estimated_profit_usdt'] = real_profit
+            return real_profit
         except Exception as e:
             logger.error(f"Ошибка расчета реальной прибыли: {str(e)}")
             return 0
