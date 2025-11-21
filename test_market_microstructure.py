@@ -138,6 +138,11 @@ class DynamicSpreadThresholdTest(unittest.TestCase):
         self.assertTrue(any(op['profit_percent'] > self.engine._last_dynamic_threshold for op in opportunities))
 
         self.engine._calculate_triangular_profit_path = lambda *args, **kwargs: 0.3
+        self.engine._calculate_direction = lambda prices, triangle, direction: {
+            'direction': direction,
+            'profit_percent': 0.8,
+            'path': ['path'],
+        }
         wide_tickers = {leg: self._ticker(100, 102) for leg in self.engine.config.TRIANGULAR_PAIRS[0]['legs']}
         opportunities = self.engine.detect_triangular_arbitrage(wide_tickers, strategy_result=None)
         self.assertGreater(self.engine._last_dynamic_threshold, min_with_costs)

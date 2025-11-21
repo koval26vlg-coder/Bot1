@@ -563,8 +563,17 @@ class AdvancedArbitrageEngine:
                     rejected_candidates += 1
                     continue
 
-                # Выбираем лучшее направление
+                # Выбираем лучшее направление и пересчитываем прибыль перед сравнением с динамическим порогом
                 best_direction = max(valid_directions, key=lambda x: x['profit_percent'])
+                recalculated_profit = best_direction['profit_percent']
+                if best_direction.get('path'):
+                    base_currency = triangle.get('base_currency', 'USDT')
+                    recalculated_profit = self._calculate_triangular_profit_path(
+                        prices,
+                        best_direction['path'],
+                        base_currency
+                    )
+                    best_direction['profit_percent'] = recalculated_profit
                 self._last_candidates.append({
                     'triangle': triangle,
                     'triangle_name': triangle_name,
@@ -572,7 +581,7 @@ class AdvancedArbitrageEngine:
                     'prices': prices
                 })
 
-                if best_direction['profit_percent'] > dynamic_profit_threshold:
+                if recalculated_profit > dynamic_profit_threshold:
                     opportunity = {
                         'type': 'triangular',
                         'triangle_name': triangle_name,
