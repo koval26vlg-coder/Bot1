@@ -15,6 +15,8 @@ class MarketMicrostructureContextTest(unittest.TestCase):
             TRIANGULAR_PAIRS=[],
             MIN_TRIANGULAR_PROFIT=0.1,
             TRADING_FEE=0.001,
+            SLIPPAGE_PROFIT_BUFFER=0.02,
+            VOLATILITY_PROFIT_MULTIPLIER=0.05,
             STRATEGY_MODE='auto',
             EMPTY_CYCLE_RELAX_STEP=0.01,
             EMPTY_CYCLE_RELAX_MAX=0.05,
@@ -94,6 +96,8 @@ class DynamicSpreadThresholdTest(unittest.TestCase):
             TRIANGULAR_PAIRS=[{'name': 'TEST', 'legs': ['ABCUST', 'BCDUST', 'ABCD'], 'priority': 1}],
             MIN_TRIANGULAR_PROFIT=0.1,
             TRADING_FEE=0.001,
+            SLIPPAGE_PROFIT_BUFFER=0.02,
+            VOLATILITY_PROFIT_MULTIPLIER=0.05,
             STRATEGY_MODE='auto',
             EMPTY_CYCLE_RELAX_STEP=0.01,
             EMPTY_CYCLE_RELAX_MAX=0.05,
@@ -117,7 +121,7 @@ class DynamicSpreadThresholdTest(unittest.TestCase):
         self.engine._check_triangle_volatility = lambda *args, **kwargs: True
         self.engine._prepare_direction_sequences = lambda legs, direction: [legs]
         self.engine._build_universal_path = lambda *args, **kwargs: ['path']
-        self.engine._calculate_triangular_profit_path = lambda *args, **kwargs: 0.06
+        self.engine._calculate_triangular_profit_path = lambda *args, **kwargs: 0.8
 
     def _ticker(self, bid, ask):
         return {'bid': bid, 'ask': ask, 'open': bid, 'high': ask, 'low': bid, 'last_price': ask, 'volume': 1000}
@@ -125,12 +129,18 @@ class DynamicSpreadThresholdTest(unittest.TestCase):
     def test_threshold_reacts_to_spread(self):
         tight_tickers = {leg: self._ticker(100, 100.1) for leg in self.engine.config.TRIANGULAR_PAIRS[0]['legs']}
         opportunities = self.engine.detect_triangular_arbitrage(tight_tickers, strategy_result=None)
-        self.assertGreaterEqual(self.engine._last_dynamic_threshold, 0.05)
+        min_with_costs = (
+            self.engine.config.MIN_TRIANGULAR_PROFIT
+            + self.engine.config.TRADING_FEE * 3 * 100
+            + self.engine.config.SLIPPAGE_PROFIT_BUFFER
+        )
+        self.assertGreaterEqual(self.engine._last_dynamic_threshold, min_with_costs)
         self.assertTrue(any(op['profit_percent'] > self.engine._last_dynamic_threshold for op in opportunities))
 
+        self.engine._calculate_triangular_profit_path = lambda *args, **kwargs: 0.3
         wide_tickers = {leg: self._ticker(100, 102) for leg in self.engine.config.TRIANGULAR_PAIRS[0]['legs']}
         opportunities = self.engine.detect_triangular_arbitrage(wide_tickers, strategy_result=None)
-        self.assertGreater(self.engine._last_dynamic_threshold, self.engine.config.MIN_TRIANGULAR_PROFIT)
+        self.assertGreater(self.engine._last_dynamic_threshold, min_with_costs)
         self.assertEqual(opportunities, [])
 
 

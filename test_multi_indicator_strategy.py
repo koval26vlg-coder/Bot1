@@ -94,6 +94,8 @@ class MultiIndicatorIntegrationTest(unittest.TestCase):
             TRIANGULAR_PAIRS=[],
             MIN_TRIANGULAR_PROFIT=0.1,
             TRADING_FEE=0.001,
+            SLIPPAGE_PROFIT_BUFFER=0.02,
+            VOLATILITY_PROFIT_MULTIPLIER=0.05,
             STRATEGY_MODE='auto',
         )
         self.engine.config = config
@@ -166,7 +168,12 @@ class MultiIndicatorIntegrationTest(unittest.TestCase):
         opportunities = self.engine.detect_triangular_arbitrage({}, strategy_result=strategy_result)
 
         self.assertEqual(opportunities, [])
-        self.assertLess(self.engine._last_dynamic_threshold, self.engine.config.MIN_TRIANGULAR_PROFIT)
+        expected_min_threshold = (
+            self.engine.config.MIN_TRIANGULAR_PROFIT
+            + self.engine.config.TRADING_FEE * 3 * 100
+            + self.engine.config.SLIPPAGE_PROFIT_BUFFER
+        )
+        self.assertGreaterEqual(self.engine._last_dynamic_threshold, expected_min_threshold)
 
 
 if __name__ == '__main__':

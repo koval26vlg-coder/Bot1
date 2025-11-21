@@ -157,10 +157,12 @@ class Config:
     MAX_TRADE_PERCENT = 8
     MAX_DAILY_TRADES = 100
     MAX_LOSS_PERCENT = 0.8
-    
+
     # Комиссии (можно настроить под разные биржи)
     TRADING_FEE = 0.001  # 0.1% комиссия за сделку
     WITHDRAWAL_FEE = 0.0  # Комиссия на вывод (не учитываем для треугольного)
+    SLIPPAGE_PROFIT_BUFFER = 0.02  # Запас на проскальзывание в процентах
+    VOLATILITY_PROFIT_MULTIPLIER = 0.05  # Усилитель порога прибыли от волатильности
     
     # Настройки логгирования
     LOG_FILE = 'triangular_arbitrage_bot.log'
