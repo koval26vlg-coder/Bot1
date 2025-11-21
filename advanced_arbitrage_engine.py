@@ -1093,107 +1093,48 @@ class AdvancedArbitrageEngine:
             return None
 
     def execute_triangular_arbitrage(self, opportunity, trade_plan):
-        """Выполнение треугольного арбитража с улучшенным отслеживанием"""
-        logger.info(f"🔺 Executing triangular arbitrage: {opportunity['triangle_name']}")
+        """Мгновенное выполнение треугольного арбитража на текущих котировках"""
+        logger.info(f"🔺 Начало исполнения треугольного арбитража: {opportunity['triangle_name']}")
 
         start_time = datetime.now()
 
         try:
-            depth_levels = getattr(self.config, 'ORDERBOOK_DEPTH_LEVELS', 5)
-            protective_spread = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
-            max_wait_seconds = getattr(self.config, 'MAX_TRIANGLE_EXECUTION_TIME', 30)
-
-            def _collect_orderbooks():
-                """Запрашивает стаканы для всех ног пути"""
-                books = {}
-                for step in opportunity['execution_path']:
-                    symbol = step['symbol']
-                    if symbol not in books:
-                        books[symbol] = self.client.get_order_book(symbol, depth_levels)
-                return books
-
-            def _validate_liquidity(order_books):
-                """Проверяет доступный объем и пересчитывает безопасные цены"""
-                for i, step in enumerate(opportunity['execution_path']):
-                    plan_key = f"step{i+1}"
-                    order_details = trade_plan.get(plan_key)
-                    if not order_details:
-                        logger.warning("Отсутствуют детали шага %s для проверки ликвидности", plan_key)
-                        return False
-
-                    book = order_books.get(step['symbol'], {})
-                    side_levels = book.get('asks' if order_details['side'] == 'Buy' else 'bids', [])
-                    if not side_levels:
-                        logger.debug("Пустой стакан для %s", step['symbol'])
-                        return False
-
-                    required_amount = order_details['amount']
-                    available_amount = 0
-                    best_price = side_levels[0].get('price', 0)
-
-                    for level in side_levels:
-                        available_amount += max(0.0, level.get('size', 0))
-                        if available_amount >= required_amount:
-                            break
-
-                    if available_amount < required_amount or best_price <= 0:
-                        logger.debug(
-                            "Недостаточный объем на верхних уровнях %s: требуется %.6f, доступно %.6f",
-                            step['symbol'],
-                            required_amount,
-                            available_amount
-                        )
-                        return False
-
-                    adjusted_price = (
-                        best_price * (1 + protective_spread)
-                        if order_details['side'] == 'Buy'
-                        else best_price * (1 - protective_spread)
-                    )
-                    trade_plan[plan_key]['price'] = adjusted_price
-
-                return True
-
-            while True:
-                order_books = _collect_orderbooks()
-
-                if _validate_liquidity(order_books):
-                    logger.debug("Стаканы подтверждены, цены обновлены защитным спредом")
-                    break
-
-                elapsed = (datetime.now() - start_time).total_seconds()
-                if elapsed > max_wait_seconds:
-                    logger.warning("⏳ Прерываем исполнение треугольника из-за истечения лимита ожидания стаканов")
-                    return False
-
-                time.sleep(0.5)
-
-            # Проверяем, не изменились ли условия
+            # Немедленно запрашиваем актуальные тикеры по всем ногам
             current_tickers = self.client.get_tickers(opportunity['symbols'])
-            if not self._validate_opportunity_still_exists(opportunity, current_tickers):
-                logger.warning("❌ Opportunity disappeared before execution")
+            if not current_tickers:
+                logger.warning("❌ Не удалось получить тикеры для проверки возможности")
                 return False
-            
-            # Исполняем сделку
+
+            # Перепроверяем сохранение возможности на свежих ценах
+            if not self._validate_opportunity_still_exists(opportunity, current_tickers):
+                logger.warning("❌ Возможность исчезла на момент проверки тикеров")
+                return False
+
+            # Быстрая проверка ликвидности и спредов без ожидания стаканов
+            if not self._quick_liquidity_check(opportunity, trade_plan, current_tickers):
+                logger.warning("❌ Быстрая проверка ликвидности не пройдена, пропускаем исполнение")
+                triangle_name = opportunity['triangle_name']
+                self.triangle_stats[triangle_name]['failures'] += 1
+                self._update_triangle_success_rate(triangle_name)
+                return False
+
+            # Мгновенно исполняем торговый план по подтвержденным ценам
             trade_result = self.real_trader.execute_arbitrage_trade(trade_plan)
-            
             execution_time = (datetime.now() - start_time).total_seconds()
-            
+
             if trade_result:
-                # Обновляем статистику треугольника
                 triangle_name = opportunity['triangle_name']
                 self.triangle_stats[triangle_name]['executed_trades'] += 1
                 self.triangle_stats[triangle_name]['total_profit'] += trade_plan['estimated_profit_usdt']
                 self.triangle_stats[triangle_name]['last_execution'] = datetime.now()
-
-                # Расчет успешности
                 self._update_triangle_success_rate(triangle_name)
-                
-                logger.info(f"✅ Triangular arbitrage executed successfully! "
-                          f"Time: {execution_time:.2f}s, "
-                          f"Profit: {trade_plan['estimated_profit_usdt']:.4f} USDT")
-                
-                # Запись расширенной информации о сделке
+
+                logger.info(
+                    "✅ Треугольный арбитраж выполнен успешно! Время: %.2fs, Прибыль: %.4f USDT",
+                    execution_time,
+                    trade_plan['estimated_profit_usdt']
+                )
+
                 trade_record = {
                     'timestamp': datetime.now(),
                     'symbol': opportunity['triangle_name'],
@@ -1219,26 +1160,67 @@ class AdvancedArbitrageEngine:
                         'real_executed': True
                     }
                 }
-                
-                # Передаем запись в мониторинг
+
                 if hasattr(self, 'monitor') and self.monitor:
                     self.monitor.track_trade(trade_record)
-                
+
                 self._record_trade(opportunity, trade_plan, trade_result.get('results', []))
                 return True
-            else:
-                logger.error("❌ Triangular arbitrage execution failed")
-                # Обновляем статистику неудач
-                triangle_name = opportunity['triangle_name']
-                self.triangle_stats[triangle_name]['failures'] += 1
-                self._update_triangle_success_rate(triangle_name)
-                return False
+
+            logger.error("❌ Исполнение треугольного арбитража завершилось ошибкой")
+            triangle_name = opportunity['triangle_name']
+            self.triangle_stats[triangle_name]['failures'] += 1
+            self._update_triangle_success_rate(triangle_name)
+            return False
 
         except Exception as e:
-            logger.error(f"🔥 Critical error executing triangular arbitrage: {str(e)}", exc_info=True)
+            logger.error(f"🔥 Критическая ошибка при исполнении треугольного арбитража: {str(e)}", exc_info=True)
             if hasattr(self, 'monitor') and hasattr(self.monitor, 'notify_alert'):
                 self.monitor.notify_alert(f"Ошибка треугольного арбитража: {str(e)}", "critical")
             return False
+
+    def _quick_liquidity_check(self, opportunity, trade_plan, current_tickers):
+        """Быстрая оценка валидности бид-аск и спреда по всем ногам"""
+        protective_spread = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+        max_spread = getattr(self.config, 'MAX_SPREAD_PERCENT', 10)
+
+        for i, step in enumerate(opportunity['execution_path']):
+            plan_key = f"step{i+1}"
+            order_details = trade_plan.get(plan_key)
+            ticker = current_tickers.get(step['symbol']) if current_tickers else None
+
+            if not order_details or not ticker:
+                logger.debug("Недостаточно данных для оценки шага %s", plan_key)
+                return False
+
+            bid = float(ticker.get('bid', 0) or 0)
+            ask = float(ticker.get('ask', 0) or 0)
+
+            if bid <= 0 or ask <= 0 or ask < bid:
+                logger.debug("Невалидные котировки для %s: bid=%s, ask=%s", step['symbol'], bid, ask)
+                return False
+
+            spread_percent = ((ask - bid) / bid) * 100
+            if spread_percent > max_spread:
+                logger.debug("Спред %.4f%% для %s превышает лимит %.4f%%", spread_percent, step['symbol'], max_spread)
+                return False
+
+            base_price = ask if order_details['side'] == 'Buy' else bid
+            adjusted_price = (
+                base_price * (1 + protective_spread)
+                if order_details['side'] == 'Buy'
+                else base_price * (1 - protective_spread)
+            )
+
+            trade_plan[plan_key]['price'] = adjusted_price
+            trade_plan[plan_key]['book_validation'] = {
+                'bid': bid,
+                'ask': ask,
+                'spread_percent': spread_percent,
+                'checked_at': datetime.now()
+            }
+
+        return True
 
     def _update_triangle_success_rate(self, triangle_name):
         """Пересчитывает успешность треугольника с учетом всех попыток."""
