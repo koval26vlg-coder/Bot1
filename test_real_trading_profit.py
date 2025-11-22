@@ -102,3 +102,35 @@ def test_execute_real_trade_uses_actual_profit(monkeypatch, triangular_orders):
     assert trade_record
     assert trade_record['total_profit'] == pytest.approx(298.8012, rel=1e-4)
     assert executor.risk_manager.last_profit == pytest.approx(298.8012, rel=1e-4)
+
+
+def test_simulation_mode_env_overrides_testnet(monkeypatch):
+    monkeypatch.setenv("TRADE_SIMULATION_MODE", "true")
+    monkeypatch.setenv("TESTNET", "False")
+    monkeypatch.setattr(real_trading.Config, "TESTNET", False)
+
+    class StubClient:
+        def __init__(self):
+            pass
+
+        def get_balance(self, coin='USDT'):
+            return {'available': 500, 'total': 500, 'coin': coin}
+
+        def get_tickers(self, symbols):
+            return {symbol: {'bid': 1.0, 'ask': 1.1, 'last': 1.05, 'timestamp': 1} for symbol in symbols}
+
+    monkeypatch.setattr(real_trading, "BybitClient", lambda: StubClient())
+
+    executor = real_trading.RealTradingExecutor()
+
+    simulated_result = {}
+    monkeypatch.setattr(executor, "_simulate_trade", lambda plan: simulated_result)
+    monkeypatch.setattr(executor, "_execute_real_trade", lambda plan: {'real': True})
+
+    trade_plan = {'step1': {'symbol': 'BTCUSDT', 'side': 'buy', 'amount': 1.0, 'price': 100}}
+
+    assert executor.simulation_mode is True
+    assert executor.config.TESTNET is False
+    assert executor.execute_arbitrage_trade(trade_plan) is simulated_result
+    balance = executor.get_balance()
+    assert balance['available'] == pytest.approx(executor._simulated_balance_usdt)
