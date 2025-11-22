@@ -328,7 +328,7 @@ class AdvancedArbitrageEngine:
         rejected_by_volatility = 0
 
         fee_rate = getattr(self.config, 'TRADING_FEE', 0)
-        commission_buffer = max(0.0, fee_rate * 3)
+        commission_buffer = max(0.0, fee_rate * 3 * 100)
         slippage_buffer = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
         volatility_component = max(0.0, market_analysis.get('overall_volatility', 0) or 0)
         volatility_buffer = min(
@@ -337,7 +337,7 @@ class AdvancedArbitrageEngine:
         )
 
         if getattr(self.config, 'TESTNET', False):
-            base_profit_threshold = 0.01
+            base_profit_threshold = getattr(self.config, 'MIN_TRIANGULAR_PROFIT', 0.01)
             dynamic_profit_threshold = base_profit_threshold
             threshold_adjustments = []
 
@@ -379,7 +379,7 @@ class AdvancedArbitrageEngine:
                 dynamic_profit_threshold = min_dynamic_floor
         else:
             # Динамический порог прибыли в зависимости от внешних факторов (боевой режим)
-            base_profit_threshold = 0.05
+            base_profit_threshold = getattr(self.config, 'MIN_TRIANGULAR_PROFIT', 0.05)
             dynamic_profit_threshold = base_profit_threshold
             threshold_adjustments = []
 
@@ -527,11 +527,16 @@ class AdvancedArbitrageEngine:
             len(threshold_adjustments),
         )
 
-        prioritized_triangles = self.performance_optimizer.get_optimized_triangles()
-        quick_filtered_triangles = self.performance_optimizer.parallel_check_liquidity(
-            prioritized_triangles,
-            tickers
-        )
+        performance_optimizer = getattr(self, 'performance_optimizer', None)
+        if performance_optimizer:
+            prioritized_triangles = performance_optimizer.get_optimized_triangles()
+            quick_filtered_triangles = performance_optimizer.parallel_check_liquidity(
+                prioritized_triangles,
+                tickers
+            )
+        else:
+            prioritized_triangles = getattr(self.config, 'TRIANGULAR_PAIRS', [])
+            quick_filtered_triangles = prioritized_triangles
         max_triangles = getattr(self.config, 'MAX_TRIANGLES_PER_CYCLE', 20)
         limited_triangles = quick_filtered_triangles[:max_triangles]
         self.optimized_triangles = limited_triangles
@@ -1119,6 +1124,7 @@ class AdvancedArbitrageEngine:
                 'triangle_name': opportunity['triangle_name'],
                 'direction': direction,
                 'initial_amount': trade_amount,
+                'base_currency': opportunity.get('base_currency', 'USDT'),
                 'estimated_profit_usdt': trade_amount * (opportunity['profit_percent'] / 100),
                 'market_conditions': opportunity['market_conditions'],
                 'timestamp': datetime.now()
@@ -1179,6 +1185,10 @@ class AdvancedArbitrageEngine:
             current_tickers = self.client.get_tickers(opportunity['symbols'])
             if not current_tickers:
                 logger.warning("❌ Не удалось получить тикеры для проверки возможности")
+                triangle_name = opportunity.get('triangle_name')
+                if triangle_name in self.triangle_stats:
+                    self.triangle_stats[triangle_name]['failures'] += 1
+                    self._update_triangle_success_rate(triangle_name)
                 return False
 
             # Перепроверяем сохранение возможности на свежих ценах
@@ -1194,9 +1204,31 @@ class AdvancedArbitrageEngine:
                 self._update_triangle_success_rate(triangle_name)
                 return False
 
+            recalculated_profit = self._recalculate_trade_plan_profit(
+                trade_plan,
+                current_tickers,
+                opportunity
+            )
+
+            if recalculated_profit is None:
+                logger.warning("❌ Не удалось пересчитать прибыль на актуальных ценах, исполнение отменено")
+                return False
+
+            if recalculated_profit <= 0:
+                logger.info(
+                    "📉 Обновленный расчёт прибыли %.6f USDT не удовлетворяет требованиям, сделка отменена",
+                    recalculated_profit
+                )
+                return False
+
             # Мгновенно исполняем торговый план по подтвержденным ценам
             trade_result = self.real_trader.execute_arbitrage_trade(trade_plan)
             execution_time = (datetime.now() - start_time).total_seconds()
+
+            actual_profit = trade_result.get(
+                'total_profit',
+                trade_plan.get('estimated_profit_usdt', 0)
+            ) if trade_result else 0
 
             if trade_result:
                 triangle_name = opportunity['triangle_name']
@@ -1215,7 +1247,7 @@ class AdvancedArbitrageEngine:
                     'timestamp': datetime.now(),
                     'symbol': opportunity['triangle_name'],
                     'type': 'triangular',
-                    'profit': trade_plan['estimated_profit_usdt'],
+                    'profit': actual_profit,
                     'profit_percent': opportunity['profit_percent'],
                     'direction': opportunity['direction'],
                     'execution_time': execution_time,
@@ -1223,10 +1255,7 @@ class AdvancedArbitrageEngine:
                     'triangle_stats': self.triangle_stats[triangle_name],
                     'trade_plan': trade_plan,
                     'results': trade_result.get('results', []),
-                    'total_profit': trade_result.get(
-                        'total_profit',
-                        trade_plan.get('estimated_profit_usdt', 0)
-                    ),
+                    'total_profit': actual_profit,
                     'details': {
                         'triangle': opportunity['triangle_name'],
                         'symbols': opportunity['symbols'],
@@ -1240,7 +1269,12 @@ class AdvancedArbitrageEngine:
                 if hasattr(self, 'monitor') and self.monitor:
                     self.monitor.track_trade(trade_record)
 
-                self._record_trade(opportunity, trade_plan, trade_result.get('results', []))
+                self._record_trade(
+                    opportunity,
+                    trade_plan,
+                    trade_result.get('results', []),
+                    actual_profit
+                )
                 return True
 
             logger.error("❌ Исполнение треугольного арбитража завершилось ошибкой")
@@ -1298,6 +1332,70 @@ class AdvancedArbitrageEngine:
 
         return True
 
+    def _recalculate_trade_plan_profit(self, trade_plan, current_tickers, opportunity):
+        """Пересчет ожидаемой прибыли по актуальным ценам с учётом комиссий и проскальзывания"""
+        initial_amount = float(trade_plan.get('initial_amount', 0) or 0)
+        if initial_amount <= 0:
+            logger.warning("⚠️ Некорректный стартовый объём для пересчёта прибыли")
+            return None
+
+        fee_rate = getattr(self.config, 'TRADING_FEE', 0)
+        protective_spread = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+        current_amount = initial_amount
+        current_asset = opportunity.get('base_currency', 'USDT')
+
+        for i, step in enumerate(opportunity['execution_path']):
+            plan_key = f"step{i+1}"
+            ticker = current_tickers.get(step['symbol'])
+            plan_step = trade_plan.get(plan_key)
+
+            if not ticker or not plan_step:
+                logger.debug("Недостаточно данных для пересчёта шага %s", plan_key)
+                return None
+
+            bid = float(ticker.get('bid', 0) or 0)
+            ask = float(ticker.get('ask', 0) or 0)
+
+            if bid <= 0 or ask <= 0:
+                logger.debug("Невалидные котировки для пересчёта %s: bid=%s, ask=%s", step['symbol'], bid, ask)
+                return None
+
+            base_currency, quote_currency = self._get_symbol_currencies(step['symbol'])
+            if not base_currency or not quote_currency:
+                logger.debug("Не удалось определить валюты тикера %s", step['symbol'])
+                return None
+            if step['side'] == 'Buy':
+                if current_asset != quote_currency:
+                    logger.debug("Несогласованная валюта шага %s: ожидается %s, текущая %s", plan_key, quote_currency, current_asset)
+                    return None
+
+                base_price = ask if step['price_type'] == 'ask' else bid
+                price = base_price * (1 + protective_spread)
+                quantity = (current_amount / price) * (1 - fee_rate)
+
+                trade_plan[plan_key]['price'] = price
+                trade_plan[plan_key]['calculated_amount'] = quantity
+                current_amount = quantity
+                current_asset = base_currency
+            else:
+                if current_asset != base_currency:
+                    logger.debug("Несогласованная валюта шага %s: ожидается %s, текущая %s", plan_key, base_currency, current_asset)
+                    return None
+
+                base_price = bid if step['price_type'] == 'bid' else ask
+                price = base_price * (1 - protective_spread)
+                proceeds = (current_amount * price) * (1 - fee_rate)
+
+                trade_plan[plan_key]['price'] = price
+                trade_plan[plan_key]['calculated_amount'] = current_amount
+                current_amount = proceeds
+                current_asset = quote_currency
+
+        recalculated_profit = current_amount - initial_amount
+        trade_plan['estimated_profit_usdt'] = recalculated_profit
+        trade_plan['recalculated_at'] = datetime.now()
+        return recalculated_profit
+
     def _update_triangle_success_rate(self, triangle_name):
         """Пересчитывает успешность треугольника с учетом всех попыток."""
         stats = self.triangle_stats.get(triangle_name)
@@ -1352,7 +1450,7 @@ class AdvancedArbitrageEngine:
         
         return report
 
-    def _record_trade(self, opportunity, trade_plan, orders):
+    def _record_trade(self, opportunity, trade_plan, orders, total_profit=None):
         """Запись информации о сделке в историю"""
         trade_record = {
             'timestamp': datetime.now(),
@@ -1360,6 +1458,7 @@ class AdvancedArbitrageEngine:
             'triangle_name': opportunity['triangle_name'],
             'profit_percent': opportunity['profit_percent'],
             'estimated_profit_usdt': trade_plan.get('estimated_profit_usdt', 0),
+            'actual_profit_usdt': total_profit if total_profit is not None else trade_plan.get('estimated_profit_usdt', 0),
             'direction': opportunity['direction'],
             'market_conditions': opportunity['market_conditions'],
             'orders': orders,
@@ -1634,10 +1733,16 @@ class AdvancedArbitrageEngine:
 
     def get_effective_balance(self, coin='USDT'):
         """Прокси-метод для получения баланса с учётом симуляции"""
-        if getattr(self.real_trader, 'simulation_mode', False):
-            return self.real_trader.get_balance(coin)
+        real_trader = getattr(self, 'real_trader', None)
+        if real_trader and getattr(real_trader, 'simulation_mode', False):
+            return real_trader.get_balance(coin)
 
-        return self.client.get_balance(coin)
+        client = getattr(self, 'client', None)
+        if client and hasattr(client, 'get_balance'):
+            return client.get_balance(coin)
+
+        logger.warning("⚠️ Недоступен источник баланса, возвращаем нулевые значения")
+        return {'available': 0.0, 'total': 0.0, 'coin': coin}
 
     def _fetch_actual_balance(self, coin='USDT'):
         """Возвращает нормализованный баланс с обработкой ошибок."""
