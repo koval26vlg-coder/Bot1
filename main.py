@@ -105,8 +105,7 @@ def _run_quick_mode(args) -> None:
     _configure_logging(args.log_level)
     optimized_config = _prepare_quick_config(args.min_profit, args.trade_amount)
 
-    engine = AdvancedArbitrageEngine()
-    engine.config = optimized_config
+    engine = AdvancedArbitrageEngine(config=optimized_config)
 
     logging.info("Запуск тестового цикла обнаружения возможностей")
     _quick_test(engine)

@@ -2676,33 +2676,53 @@ from math_stats import mean, rolling_mean
 logger = logging.getLogger(__name__)
 
 class AdvancedArbitrageEngine:
-    def __init__(self):
+    def __init__(self, config=None):
         self._log_module_origin()
         self._ensure_integrity()
-
-        self.config = Config()
-        self._validate_config()
-
-        cooldown_from_config = getattr(self.config, 'COOLDOWN_PERIOD', None)
-        self.cooldown_period = cooldown_from_config if cooldown_from_config else 180
 
         self.client = BybitClient()
         self.monitor = AdvancedMonitor(self)
         self.real_trader = RealTradingExecutor()
-        self.strategy_manager = StrategyManager(self.config)
-        self.performance_optimizer = PerformanceOptimizer(self.config)
+        self.strategy_manager = None
+        self.performance_optimizer = None
 
-        self._initialize_data_structures()
-        self._initialize_triangle_stats()
-
-        # Инициализация всех символов
-        self._initialize_symbols()
-
-        # Предварительная оптимизация списка треугольников
-        self.optimized_triangles = self.performance_optimizer.get_optimized_triangles()
+        base_config = config or Config()
+        self._apply_config(base_config, reset_state=True, recreate_client=False)
 
         self.monitor.start_monitoring_loop()
         logger.info("🚀 Advanced Triangular Arbitrage Engine initialized")
+
+    def _apply_config(self, new_config, *, reset_state=True, recreate_client=True):
+        """Подменяет конфигурацию и пересобирает связанные структуры."""
+
+        if not self._validate_config(new_config):
+            logger.error("❌ Переданная конфигурация не прошла валидацию")
+            return False
+
+        self.config = new_config
+
+        if recreate_client:
+            self.client = BybitClient()
+
+        self.cooldown_period = getattr(self.config, 'COOLDOWN_PERIOD', None) or 180
+
+        if self.strategy_manager is None:
+            self.strategy_manager = StrategyManager(self.config)
+        else:
+            self.strategy_manager.update_config(self.config)
+
+        if self.performance_optimizer is None:
+            self.performance_optimizer = PerformanceOptimizer(self.config)
+        else:
+            self.performance_optimizer.update_config(self.config)
+
+        if reset_state:
+            self._initialize_data_structures()
+
+        self._initialize_triangle_stats()
+        self._initialize_symbols()
+        self.optimized_triangles = self.performance_optimizer.get_optimized_triangles()
+        return True
 
     def _log_module_origin(self):
         """Фиксирует путь к модулю, откуда загружен движок."""
@@ -2784,17 +2804,10 @@ class AdvancedArbitrageEngine:
         """Перезагрузка конфигурации без перезапуска бота."""
         try:
             new_config = Config()
-            if not self._validate_config(new_config):
+            if not self._apply_config(new_config, reset_state=True, recreate_client=True):
                 logger.error("❌ Перезагрузка конфигурации отменена из-за ошибок валидации")
                 return False
 
-            self.config = new_config
-            self.strategy_manager.update_config(new_config)
-            self.performance_optimizer.update_config(new_config)
-            self.client = BybitClient()
-            self._initialize_triangle_stats()
-            self._initialize_symbols()
-            self.optimized_triangles = self.performance_optimizer.get_optimized_triangles()
             logger.info("🔄 Конфигурация успешно перезагружена без рестарта")
             return True
         except Exception as exc:
