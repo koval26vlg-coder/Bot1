@@ -15,6 +15,10 @@ class PerformanceOptimizer:
         # Ключевые активы, которые стоит обрабатывать первыми.
         self._core_assets = {"BTC", "ETH", "BNB"}
 
+    def update_config(self, config):
+        """Обновляет конфигурацию оптимизатора без пересоздания объекта."""
+        self.config = config
+
     def get_optimized_triangles(
         self,
         tickers: Optional[Dict[str, Dict[str, float]]] = None,
