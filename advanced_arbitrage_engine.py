@@ -183,6 +183,187 @@ class AdvancedArbitrageEngine:
 
         return market_analysis
 
+    def _calc_dynamic_threshold_testnet(self, base_profit_threshold, market_analysis, commission_buffer, slippage_buffer, volatility_buffer):
+        """Расчет динамического порога для тестовой среды."""
+        dynamic_profit_threshold = base_profit_threshold
+        threshold_adjustments = []
+
+        dynamic_profit_threshold += commission_buffer
+        threshold_adjustments.append({'reason': 'комиссии цикла', 'value': commission_buffer})
+
+        if slippage_buffer:
+            dynamic_profit_threshold += slippage_buffer
+            threshold_adjustments.append({'reason': 'запас на проскальзывание', 'value': slippage_buffer})
+
+        spread_adjustment = min(0.02, (market_analysis.get('average_spread_percent', 0) or 0) / 150)
+        if spread_adjustment:
+            dynamic_profit_threshold += spread_adjustment
+            threshold_adjustments.append({'reason': 'средний спред', 'value': spread_adjustment})
+
+        if market_analysis['market_conditions'] == 'high_volatility':
+            dynamic_profit_threshold += 0.01
+            threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.01})
+        elif market_analysis['market_conditions'] == 'low_volatility':
+            dynamic_profit_threshold -= 0.005
+            threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.005})
+
+        if self.no_opportunity_cycles:
+            relax = -min(0.03, self.no_opportunity_cycles * 0.005)
+            dynamic_profit_threshold += relax
+            threshold_adjustments.append({'reason': 'накопленные пустые циклы', 'value': relax})
+
+        if volatility_buffer:
+            dynamic_profit_threshold += volatility_buffer
+            threshold_adjustments.append({'reason': 'реальная волатильность', 'value': volatility_buffer})
+
+        min_dynamic_floor = max(
+            getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
+            base_profit_threshold + commission_buffer + slippage_buffer
+        )
+        if dynamic_profit_threshold < min_dynamic_floor:
+            threshold_adjustments.append({'reason': 'нижняя граница тестнета', 'value': min_dynamic_floor - dynamic_profit_threshold})
+            dynamic_profit_threshold = min_dynamic_floor
+
+        return dynamic_profit_threshold, threshold_adjustments
+
+    def _calc_dynamic_threshold_live(self, base_profit_threshold, market_analysis, commission_buffer, slippage_buffer, volatility_buffer, tickers, strategy_result):
+        """Расчет динамического порога для боевого режима."""
+        dynamic_profit_threshold = base_profit_threshold
+        threshold_adjustments = []
+
+        dynamic_profit_threshold += commission_buffer
+        threshold_adjustments.append({
+            'reason': 'комиссии цикла',
+            'value': commission_buffer
+        })
+
+        if slippage_buffer:
+            dynamic_profit_threshold += slippage_buffer
+            threshold_adjustments.append({
+                'reason': 'запас на проскальзывание',
+                'value': slippage_buffer
+            })
+
+        spread_adjustment = self._calculate_spread_adjustment(tickers)
+        if spread_adjustment != 0:
+            dynamic_profit_threshold += spread_adjustment
+            threshold_adjustments.append({
+                'reason': 'рыночный спред',
+                'value': spread_adjustment
+            })
+
+        safe_strategy_context = getattr(self, 'last_strategy_context', {}) or {}
+        context_spread = safe_strategy_context.get('average_spread_percent') if isinstance(safe_strategy_context, dict) else None
+        if context_spread is not None:
+            context_spread_adjustment = 0.0
+            if context_spread > 1.0:
+                context_spread_adjustment = min(0.08, context_spread / 120)
+            elif context_spread < 0.25:
+                context_spread_adjustment = -0.03
+
+            if context_spread_adjustment:
+                dynamic_profit_threshold += context_spread_adjustment
+                threshold_adjustments.append({
+                    'reason': 'средний спред контекста',
+                    'value': context_spread_adjustment
+                })
+
+        context_imbalance = safe_strategy_context.get('orderbook_imbalance') if isinstance(safe_strategy_context, dict) else None
+        if context_imbalance is not None:
+            imbalance_strength = abs(context_imbalance)
+            if imbalance_strength > 0.2:
+                imbalance_adjustment = -0.02 * min(1.5, 1 + imbalance_strength)
+                dynamic_profit_threshold += imbalance_adjustment
+                threshold_adjustments.append({
+                    'reason': 'дисбаланс стакана',
+                    'value': imbalance_adjustment
+                })
+
+        if market_analysis['market_conditions'] == 'high_volatility':
+            dynamic_profit_threshold += 0.03
+            threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.03})
+        elif market_analysis['market_conditions'] == 'low_volatility':
+            dynamic_profit_threshold -= 0.02
+            threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.02})
+
+        if volatility_buffer:
+            dynamic_profit_threshold += volatility_buffer
+            threshold_adjustments.append({
+                'reason': 'реальная волатильность',
+                'value': volatility_buffer
+            })
+
+        if strategy_result:
+            signal = (strategy_result.signal or '').lower()
+            confidence = getattr(strategy_result, 'confidence', 0) or 0
+            confidence = max(0.0, min(1.0, confidence))
+            strategy_bias_map = {
+                'increase_risk': -0.04,
+                'long_bias': -0.03,
+                'reduce_risk': 0.04,
+                'short_bias': 0.03
+            }
+            if signal in strategy_bias_map:
+                strategy_adjustment = strategy_bias_map[signal] * (1 + confidence)
+                dynamic_profit_threshold += strategy_adjustment
+                threshold_adjustments.append({
+                    'reason': f'сигнал стратегии {signal}',
+                    'value': strategy_adjustment
+                })
+
+            if getattr(strategy_result, 'name', '') == 'multi_indicator':
+                extended_bias_map = {
+                    'long': -0.05,
+                    'short': 0.05,
+                    'flat': 0.01,
+                }
+                bias_shift = extended_bias_map.get(signal, 0.0) * (1 + confidence)
+                dynamic_profit_threshold += bias_shift
+                threshold_adjustments.append({
+                    'reason': f'мульти-индикаторный сигнал {signal}',
+                    'value': bias_shift
+                })
+
+                meta = getattr(strategy_result, 'meta', {}) or {}
+                atr_percent = meta.get('atr_percent', 0.0)
+                if atr_percent > 1:
+                    atr_adjustment = min(0.08, 0.02 * atr_percent)
+                    dynamic_profit_threshold += atr_adjustment
+                    threshold_adjustments.append({
+                        'reason': 'высокий ATR',
+                        'value': atr_adjustment
+                    })
+                elif atr_percent < 0.4 and signal == 'long':
+                    atr_adjustment = -0.015 * (1 + confidence)
+                    dynamic_profit_threshold += atr_adjustment
+                    threshold_adjustments.append({
+                        'reason': 'низкий ATR, подтверждение импульса',
+                        'value': atr_adjustment
+                    })
+
+        if self.no_opportunity_cycles > 0:
+            relax_step = getattr(self.config, 'EMPTY_CYCLE_RELAX_STEP', 0.01)
+            relax_cap = getattr(self.config, 'EMPTY_CYCLE_RELAX_MAX', 0.05)
+            empty_cycle_adjustment = -min(self.no_opportunity_cycles * relax_step, relax_cap)
+            dynamic_profit_threshold += empty_cycle_adjustment
+            threshold_adjustments.append({
+                'reason': f'{self.no_opportunity_cycles} пустых циклов',
+                'value': empty_cycle_adjustment
+            })
+
+        min_dynamic_floor = max(
+            getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
+            base_profit_threshold + commission_buffer + slippage_buffer
+        )
+        if dynamic_profit_threshold < min_dynamic_floor:
+            threshold_adjustments.append({
+                'reason': 'динамический минимум',
+                'value': min_dynamic_floor - dynamic_profit_threshold
+            })
+            dynamic_profit_threshold = min_dynamic_floor
+
+        return dynamic_profit_threshold, threshold_adjustments
+
     def _build_market_dataframe(self, symbol=None, min_points=5):
         """Формирует список баров по одному символу или агрегирует несколько."""
 
@@ -335,184 +516,25 @@ class AdvancedArbitrageEngine:
 
         if getattr(self.config, 'TESTNET', False):
             base_profit_threshold = getattr(self.config, 'MIN_TRIANGULAR_PROFIT', 0.01)
-            dynamic_profit_threshold = base_profit_threshold
-            threshold_adjustments = []
-
-            dynamic_profit_threshold += commission_buffer
-            threshold_adjustments.append({'reason': 'комиссии цикла', 'value': commission_buffer})
-
-            if slippage_buffer:
-                dynamic_profit_threshold += slippage_buffer
-                threshold_adjustments.append({'reason': 'запас на проскальзывание', 'value': slippage_buffer})
-
-            # Упрощенные корректировки для тестовой среды
-            spread_adjustment = min(0.02, (market_analysis.get('average_spread_percent', 0) or 0) / 150)
-            if spread_adjustment:
-                dynamic_profit_threshold += spread_adjustment
-                threshold_adjustments.append({'reason': 'средний спред', 'value': spread_adjustment})
-
-            if market_analysis['market_conditions'] == 'high_volatility':
-                dynamic_profit_threshold += 0.01
-                threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.01})
-            elif market_analysis['market_conditions'] == 'low_volatility':
-                dynamic_profit_threshold -= 0.005
-                threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.005})
-
-            if self.no_opportunity_cycles:
-                relax = -min(0.03, self.no_opportunity_cycles * 0.005)
-                dynamic_profit_threshold += relax
-                threshold_adjustments.append({'reason': 'накопленные пустые циклы', 'value': relax})
-
-            if volatility_buffer:
-                dynamic_profit_threshold += volatility_buffer
-                threshold_adjustments.append({'reason': 'реальная волатильность', 'value': volatility_buffer})
-
-            min_dynamic_floor = max(
-                getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
-                base_profit_threshold + commission_buffer + slippage_buffer
+            dynamic_profit_threshold, threshold_adjustments = self._calc_dynamic_threshold_testnet(
+                base_profit_threshold,
+                market_analysis,
+                commission_buffer,
+                slippage_buffer,
+                volatility_buffer
             )
-            if dynamic_profit_threshold < min_dynamic_floor:
-                threshold_adjustments.append({'reason': 'нижняя граница тестнета', 'value': min_dynamic_floor - dynamic_profit_threshold})
-                dynamic_profit_threshold = min_dynamic_floor
         else:
             # Динамический порог прибыли в зависимости от внешних факторов (боевой режим)
             base_profit_threshold = getattr(self.config, 'MIN_TRIANGULAR_PROFIT', 0.05)
-            dynamic_profit_threshold = base_profit_threshold
-            threshold_adjustments = []
-
-            dynamic_profit_threshold += commission_buffer
-            threshold_adjustments.append({
-                'reason': 'комиссии цикла',
-                'value': commission_buffer
-            })
-
-            if slippage_buffer:
-                dynamic_profit_threshold += slippage_buffer
-                threshold_adjustments.append({
-                    'reason': 'запас на проскальзывание',
-                    'value': slippage_buffer
-                })
-
-            spread_adjustment = self._calculate_spread_adjustment(tickers)
-            if spread_adjustment != 0:
-                dynamic_profit_threshold += spread_adjustment
-                threshold_adjustments.append({
-                    'reason': 'рыночный спред',
-                    'value': spread_adjustment
-                })
-
-            safe_strategy_context = getattr(self, 'last_strategy_context', {}) or {}
-            context_spread = safe_strategy_context.get('average_spread_percent') if isinstance(safe_strategy_context, dict) else None
-            if context_spread is not None:
-                context_spread_adjustment = 0.0
-                if context_spread > 1.0:
-                    context_spread_adjustment = min(0.08, context_spread / 120)
-                elif context_spread < 0.25:
-                    context_spread_adjustment = -0.03
-
-                if context_spread_adjustment:
-                    dynamic_profit_threshold += context_spread_adjustment
-                    threshold_adjustments.append({
-                        'reason': 'средний спред контекста',
-                        'value': context_spread_adjustment
-                    })
-
-            context_imbalance = safe_strategy_context.get('orderbook_imbalance') if isinstance(safe_strategy_context, dict) else None
-            if context_imbalance is not None:
-                imbalance_strength = abs(context_imbalance)
-                if imbalance_strength > 0.2:
-                    imbalance_adjustment = -0.02 * min(1.5, 1 + imbalance_strength)
-                    dynamic_profit_threshold += imbalance_adjustment
-                    threshold_adjustments.append({
-                        'reason': 'дисбаланс стакана',
-                        'value': imbalance_adjustment
-                    })
-
-            if market_analysis['market_conditions'] == 'high_volatility':
-                dynamic_profit_threshold += 0.03  # Увеличиваем порог при высокой волатильности
-                threshold_adjustments.append({'reason': 'высокая волатильность', 'value': 0.03})
-            elif market_analysis['market_conditions'] == 'low_volatility':
-                dynamic_profit_threshold -= 0.02  # Уменьшаем порог при низкой волатильности
-                threshold_adjustments.append({'reason': 'низкая волатильность', 'value': -0.02})
-
-            if volatility_buffer:
-                dynamic_profit_threshold += volatility_buffer
-                threshold_adjustments.append({
-                    'reason': 'реальная волатильность',
-                    'value': volatility_buffer
-                })
-
-            # Корректировка по сигналу стратегии
-            strategy_adjustment = 0.0
-            if strategy_result:
-                signal = (strategy_result.signal or '').lower()
-                confidence = getattr(strategy_result, 'confidence', 0) or 0
-                confidence = max(0.0, min(1.0, confidence))
-                strategy_bias_map = {
-                    'increase_risk': -0.04,
-                    'long_bias': -0.03,
-                    'reduce_risk': 0.04,
-                    'short_bias': 0.03
-                }
-                if signal in strategy_bias_map:
-                    strategy_adjustment = strategy_bias_map[signal] * (1 + confidence)
-                    dynamic_profit_threshold += strategy_adjustment
-                    threshold_adjustments.append({
-                        'reason': f'сигнал стратегии {signal}',
-                        'value': strategy_adjustment
-                    })
-
-                if getattr(strategy_result, 'name', '') == 'multi_indicator':
-                    extended_bias_map = {
-                        'long': -0.05,
-                        'short': 0.05,
-                        'flat': 0.01,
-                    }
-                    bias_shift = extended_bias_map.get(signal, 0.0) * (1 + confidence)
-                    dynamic_profit_threshold += bias_shift
-                    threshold_adjustments.append({
-                        'reason': f'мульти-индикаторный сигнал {signal}',
-                        'value': bias_shift
-                    })
-
-                    meta = getattr(strategy_result, 'meta', {}) or {}
-                    atr_percent = meta.get('atr_percent', 0.0)
-                    if atr_percent > 1:
-                        atr_adjustment = min(0.08, 0.02 * atr_percent)
-                        dynamic_profit_threshold += atr_adjustment
-                        threshold_adjustments.append({
-                            'reason': 'высокий ATR',
-                            'value': atr_adjustment
-                        })
-                    elif atr_percent < 0.4 and signal == 'long':
-                        atr_adjustment = -0.015 * (1 + confidence)
-                        dynamic_profit_threshold += atr_adjustment
-                        threshold_adjustments.append({
-                            'reason': 'низкий ATR, подтверждение импульса',
-                            'value': atr_adjustment
-                        })
-
-            # Корректировка в зависимости от количества пустых циклов
-            if self.no_opportunity_cycles > 0:
-                relax_step = getattr(self.config, 'EMPTY_CYCLE_RELAX_STEP', 0.01)
-                relax_cap = getattr(self.config, 'EMPTY_CYCLE_RELAX_MAX', 0.05)
-                empty_cycle_adjustment = -min(self.no_opportunity_cycles * relax_step, relax_cap)
-                dynamic_profit_threshold += empty_cycle_adjustment
-                threshold_adjustments.append({
-                    'reason': f'{self.no_opportunity_cycles} пустых циклов',
-                    'value': empty_cycle_adjustment
-                })
-
-            min_dynamic_floor = max(
-                getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
-                base_profit_threshold + commission_buffer + slippage_buffer
+            dynamic_profit_threshold, threshold_adjustments = self._calc_dynamic_threshold_live(
+                base_profit_threshold,
+                market_analysis,
+                commission_buffer,
+                slippage_buffer,
+                volatility_buffer,
+                tickers,
+                strategy_result
             )
-            if dynamic_profit_threshold < min_dynamic_floor:
-                threshold_adjustments.append({
-                    'reason': 'динамический минимум',
-                    'value': min_dynamic_floor - dynamic_profit_threshold
-                })
-                dynamic_profit_threshold = min_dynamic_floor
 
         dynamic_profit_threshold = max(0.0, dynamic_profit_threshold)
         self._last_dynamic_threshold = dynamic_profit_threshold
