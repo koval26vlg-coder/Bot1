@@ -97,10 +97,18 @@ class Config:
     def SYMBOLS(self):
         """Список наблюдаемых тикеров, согласованный с биржей"""
         if self._symbol_watchlist_cache is None:
-            watchlist = set(self.DEFAULT_SYMBOLS)
+            available_symbols = list(self._fetch_market_symbols())
+            watchlist = list(available_symbols)
+
+            triangle_legs = set()
             for triangle in self.TRIANGULAR_PAIRS:
-                watchlist.update(triangle['legs'])
-            self._symbol_watchlist_cache = sorted(watchlist)
+                triangle_legs.update(triangle['legs'])
+
+            for leg in sorted(triangle_legs):
+                if leg not in watchlist:
+                    watchlist.append(leg)
+
+            self._symbol_watchlist_cache = watchlist
         return self._symbol_watchlist_cache
 
     @property
@@ -458,23 +466,40 @@ class Config:
             data = response.json()
             if data.get('retCode') == 0:
                 self._symbol_details_map = {}
-                symbols = set()
+                detailed_symbols = {}
+                market_entries = []
 
                 for item in data.get('result', {}).get('list', []):
                     symbol = item.get('symbol')
                     base_coin = item.get('baseCoin')
                     quote_coin = item.get('quoteCoin')
+                    turnover_raw = item.get('turnover24h')
 
                     if not symbol:
                         continue
 
-                    symbols.add(symbol)
                     if base_coin and quote_coin:
-                        self._symbol_details_map[symbol] = (base_coin.upper(), quote_coin.upper())
+                        detailed_symbols[symbol] = (base_coin.upper(), quote_coin.upper())
 
-                self._available_symbols_cache = symbols
+                    try:
+                        turnover_value = float(turnover_raw) if turnover_raw is not None else 0.0
+                    except (TypeError, ValueError):
+                        turnover_value = 0.0
+
+                    market_entries.append((symbol, turnover_value))
+
+                market_entries.sort(key=lambda entry: entry[1], reverse=True)
+                top_entries = market_entries[:20]
+
+                self._available_symbols_cache = [symbol for symbol, _ in top_entries]
+                self._symbol_details_map = {
+                    symbol: detailed_symbols.get(symbol) for symbol, _ in top_entries
+                    if detailed_symbols.get(symbol)
+                }
                 logger.info(
-                    "Получено %s тикеров для категории %s", len(symbols), self.MARKET_CATEGORY
+                    "Получено %s тикеров для категории %s (отсортировано по обороту)",
+                    len(self._available_symbols_cache),
+                    self.MARKET_CATEGORY
                 )
                 return self._available_symbols_cache
 
@@ -486,7 +511,7 @@ class Config:
                 "Не удалось получить инструменты Bybit (%s): %s", self.MARKET_CATEGORY, exc
             )
 
-        self._available_symbols_cache = set()
+        self._available_symbols_cache = []
         return self._available_symbols_cache
 
     def _build_available_cross_map(self):
