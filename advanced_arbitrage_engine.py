@@ -104,48 +104,53 @@ class AdvancedArbitrageEngine:
         current_time = datetime.now()
 
         for symbol, data in tickers.items():
-            if symbol not in self.price_history:
+            try:
+                if symbol not in self.price_history:
+                    continue
+
+                bid = data.get('bid', 0)
+                ask = data.get('ask', 0)
+                bid_volume = data.get('bid_size') or data.get('bid_qty') or data.get('bid_volume') or data.get('bidVol') or data.get('bidVol24h') or 0
+                ask_volume = data.get('ask_size') or data.get('ask_qty') or data.get('ask_volume') or data.get('askVol') or data.get('askVol24h') or 0
+
+                # Обновление истории цен
+                self.price_history[symbol]['timestamps'].append(current_time)
+                self.price_history[symbol]['bids'].append(bid)
+                self.price_history[symbol]['asks'].append(ask)
+                self.price_history[symbol]['bid_volumes'].append(float(bid_volume))
+                self.price_history[symbol]['ask_volumes'].append(float(ask_volume))
+
+                # Расчет спреда
+                if bid > 0 and ask > 0:
+                    spread_percent = ((ask - bid) / bid) * 100
+                    self.price_history[symbol]['spreads'].append(spread_percent)
+                    self.price_history[symbol]['raw_spreads'].append(ask - bid)
+
+                # Обновление волатильности
+                mid_price = (bid + ask) / 2
+                if len(self.price_history[symbol]['bids']) > 1:
+                    prev_mid = (self.price_history[symbol]['bids'][-2] +
+                               self.price_history[symbol]['asks'][-2]) / 2
+                    price_change = ((mid_price - prev_mid) / prev_mid) * 100
+                    self.volatility_data[symbol]['short_term'].append(abs(price_change))
+
+                # Агрегируем OHLCV для индикаторов
+                ohlcv = self.ohlcv_history[symbol]
+                open_price = data.get('open', bid)
+                high_price = data.get('high', max(bid, ask))
+                low_price = data.get('low', min(bid, ask))
+                close_price = data.get('last_price', mid_price)
+                volume = data.get('volume', data.get('turnover24h', 0))
+
+                ohlcv['timestamps'].append(current_time)
+                ohlcv['open'].append(open_price)
+                ohlcv['high'].append(high_price)
+                ohlcv['low'].append(low_price)
+                ohlcv['close'].append(close_price)
+                ohlcv['volume'].append(volume)
+            except KeyError as exc:
+                logger.warning("Пропуск тикера %s из-за отсутствующего ключа: %s. Сырой ответ: %s", symbol, exc, data)
                 continue
-
-            bid, ask = data['bid'], data['ask']
-            bid_volume = data.get('bid_size') or data.get('bid_qty') or data.get('bid_volume') or data.get('bidVol') or data.get('bidVol24h') or 0
-            ask_volume = data.get('ask_size') or data.get('ask_qty') or data.get('ask_volume') or data.get('askVol') or data.get('askVol24h') or 0
-
-            # Обновление истории цен
-            self.price_history[symbol]['timestamps'].append(current_time)
-            self.price_history[symbol]['bids'].append(bid)
-            self.price_history[symbol]['asks'].append(ask)
-            self.price_history[symbol]['bid_volumes'].append(float(bid_volume))
-            self.price_history[symbol]['ask_volumes'].append(float(ask_volume))
-
-            # Расчет спреда
-            if bid > 0 and ask > 0:
-                spread_percent = ((ask - bid) / bid) * 100
-                self.price_history[symbol]['spreads'].append(spread_percent)
-                self.price_history[symbol]['raw_spreads'].append(ask - bid)
-
-            # Обновление волатильности
-            mid_price = (bid + ask) / 2
-            if len(self.price_history[symbol]['bids']) > 1:
-                prev_mid = (self.price_history[symbol]['bids'][-2] +
-                           self.price_history[symbol]['asks'][-2]) / 2
-                price_change = ((mid_price - prev_mid) / prev_mid) * 100
-                self.volatility_data[symbol]['short_term'].append(abs(price_change))
-
-            # Агрегируем OHLCV для индикаторов
-            ohlcv = self.ohlcv_history[symbol]
-            open_price = data.get('open', bid)
-            high_price = data.get('high', max(bid, ask))
-            low_price = data.get('low', min(bid, ask))
-            close_price = data.get('last_price', mid_price)
-            volume = data.get('volume', data.get('turnover24h', 0))
-
-            ohlcv['timestamps'].append(current_time)
-            ohlcv['open'].append(open_price)
-            ohlcv['high'].append(high_price)
-            ohlcv['low'].append(low_price)
-            ohlcv['close'].append(close_price)
-            ohlcv['volume'].append(volume)
 
     def analyze_market_conditions(self):
         """Анализ рыночных условий для оптимизации арбитража"""
