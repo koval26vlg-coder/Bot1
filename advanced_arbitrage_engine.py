@@ -328,7 +328,7 @@ class AdvancedArbitrageEngine:
         rejected_by_volatility = 0
 
         fee_rate = getattr(self.config, 'TRADING_FEE', 0)
-        commission_buffer = max(0.0, fee_rate * 3 * 100)
+        commission_buffer = max(0.0, fee_rate * 3)
         slippage_buffer = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
         volatility_component = max(0.0, market_analysis.get('overall_volatility', 0) or 0)
         volatility_buffer = min(
@@ -337,7 +337,7 @@ class AdvancedArbitrageEngine:
         )
 
         if getattr(self.config, 'TESTNET', False):
-            base_profit_threshold = 0.05
+            base_profit_threshold = 0.01
             dynamic_profit_threshold = base_profit_threshold
             threshold_adjustments = []
 
@@ -379,7 +379,7 @@ class AdvancedArbitrageEngine:
                 dynamic_profit_threshold = min_dynamic_floor
         else:
             # Динамический порог прибыли в зависимости от внешних факторов (боевой режим)
-            base_profit_threshold = 0.08
+            base_profit_threshold = 0.05
             dynamic_profit_threshold = base_profit_threshold
             threshold_adjustments = []
 
