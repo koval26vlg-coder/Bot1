@@ -2166,18 +2166,26 @@ class Dashboard:
     
     def _create_cooldown_status(self):
         """Создание статуса кулдауна"""
+        cooldown_period = (
+            getattr(self.engine, 'cooldown_period', None)
+            or getattr(getattr(self.engine, 'config', None), 'COOLDOWN_PERIOD', None)
+        )
+
+        if not cooldown_period or cooldown_period <= 0:
+            return html.Div("No cooldowns active", className="text-muted")
+
         if not hasattr(self.engine, 'last_arbitrage_time') or not self.engine.last_arbitrage_time:
             return html.Div("No cooldowns active", className="text-muted")
-        
+
         now = datetime.now()
         cooldown_items = []
-        
+
         for symbol, last_time in self.engine.last_arbitrage_time.items():
             elapsed = (now - last_time).total_seconds()
-            remaining = max(0, self.engine.cooldown_period - elapsed)
-            
+            remaining = max(0, cooldown_period - elapsed)
+
             if remaining > 0:
-                progress = (elapsed / self.engine.cooldown_period) * 100
+                progress = (elapsed / cooldown_period) * 100
                 cooldown_items.append(
                     dbc.Progress(
                         value=progress,
@@ -2674,6 +2682,9 @@ class AdvancedArbitrageEngine:
 
         self.config = Config()
         self._validate_config()
+
+        cooldown_from_config = getattr(self.config, 'COOLDOWN_PERIOD', None)
+        self.cooldown_period = cooldown_from_config if cooldown_from_config else 180
 
         self.client = BybitClient()
         self.monitor = AdvancedMonitor(self)
