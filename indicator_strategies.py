@@ -33,6 +33,7 @@ class StrategyManager:
             'momentum_bias': self._momentum_bias_strategy,
             'multi_indicator': self._multi_indicator_strategy,
             'orderbook_balance': self._orderbook_balance_strategy,
+            'pattern_recognition': self._pattern_recognition_strategy,
         }
 
     def evaluate(self, market_df: Sequence[dict], context: Dict[str, float]) -> Optional[StrategyResult]:
@@ -409,6 +410,109 @@ class StrategyManager:
         # Берём самый сильный паттерн
         name, bias, strength = max(patterns, key=lambda item: item[2])
         return {'name': name, 'bias': bias, 'strength': float(strength)}
+
+    def _pattern_recognition_strategy(
+        self,
+        market_df: Sequence[dict],
+        context: Dict[str, float],
+    ) -> StrategyResult:
+        """Распознаёт свечные паттерны и подтверждает их объёмами."""
+
+        rows_by_symbol = defaultdict(list)
+        for row in market_df:
+            symbol = row.get('symbol', 'default')
+            rows_by_symbol[symbol].append(row)
+
+        if not rows_by_symbol:
+            return StrategyResult(
+                name='pattern_recognition',
+                signal='wait_for_data',
+                score=0.0,
+                confidence=0.0,
+                meta={},
+            )
+
+        symbol_rows = max(rows_by_symbol.values(), key=len)
+        opens = [float(r['open']) for r in symbol_rows if r.get('open') is not None]
+        highs = [float(r['high']) for r in symbol_rows if r.get('high') is not None]
+        lows = [float(r['low']) for r in symbol_rows if r.get('low') is not None]
+        closes = [float(r['close']) for r in symbol_rows if r.get('close') is not None]
+        volumes = [float(r['volume']) for r in symbol_rows if r.get('volume') is not None]
+
+        if min(len(opens), len(highs), len(lows), len(closes), len(volumes)) < 2:
+            return StrategyResult(
+                name='pattern_recognition',
+                signal='wait_for_data',
+                score=0.0,
+                confidence=0.0,
+                meta={},
+            )
+
+        pattern = self._detect_pattern_with_flag(opens, highs, lows, closes)
+
+        avg_volume = mean(volumes[:-1]) if len(volumes) > 1 else volumes[0]
+        volume_ratio = float(volumes[-1] / avg_volume) if avg_volume else 1.0
+        volume_confirmation = float(min(1.0, max(0.0, volume_ratio - 0.5)))
+
+        signal_map = {
+            'bullish': 'long',
+            'bearish': 'short',
+            'neutral': 'neutral',
+        }
+        signal = signal_map.get(pattern['bias'], 'neutral')
+
+        pattern_strength = pattern['strength']
+        if pattern_strength < 0.1:
+            signal = 'neutral'
+
+        score = float(1 + pattern_strength * 2 + volume_confirmation)
+        confidence = float(min(1.0, pattern_strength * 0.7 + volume_confirmation * 0.5))
+
+        meta = {
+            'pattern_name': pattern['name'],
+            'pattern_bias': pattern['bias'],
+            'pattern_strength': float(pattern_strength),
+            'volume_ratio': volume_ratio,
+        }
+
+        return StrategyResult(
+            name='pattern_recognition',
+            signal=signal,
+            score=score,
+            confidence=confidence,
+            meta=meta,
+        )
+
+    def _detect_pattern_with_flag(
+        self,
+        opens: Sequence[float],
+        highs: Sequence[float],
+        lows: Sequence[float],
+        closes: Sequence[float],
+    ) -> Dict[str, str | float]:
+        """Расширенный поиск паттернов, включая флаги."""
+
+        base_pattern = self._detect_candlestick_pattern(opens, highs, lows, closes)
+        candidates = [base_pattern] if base_pattern['name'] != 'none' else []
+
+        if len(closes) >= 4:
+            range_values = [h - l for h, l in zip(highs, lows)]
+            impulse_up = closes[-3] > closes[-4] and closes[-2] >= closes[-3]
+            impulse_down = closes[-3] < closes[-4] and closes[-2] <= closes[-3]
+            compact_consolidation = max(range_values[-2:]) < min(range_values[-4:-2]) * 0.8
+
+            if impulse_up and compact_consolidation:
+                strength = min(0.5, (closes[-2] - closes[-4]) / max(closes[-4], 1e-9) * 0.3)
+                candidates.append({'name': 'bull_flag', 'bias': 'bullish', 'strength': float(strength)})
+
+            if impulse_down and compact_consolidation:
+                strength = min(0.5, (closes[-4] - closes[-2]) / max(closes[-4], 1e-9) * 0.3)
+                candidates.append({'name': 'bear_flag', 'bias': 'bearish', 'strength': float(strength)})
+
+        if not candidates:
+            return {'name': 'none', 'bias': 'neutral', 'strength': 0.0}
+
+        return max(candidates, key=lambda p: p['strength'])
 
 
 __all__ = ['StrategyManager', 'StrategyResult']
