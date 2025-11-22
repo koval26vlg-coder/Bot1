@@ -68,13 +68,36 @@ class RealTradingExecutor:
         self._simulated_balance_usdt = self._load_simulated_balance()
 
         # Режим симуляции (True = симуляция, False = реальные ордера)
-        simulation_override = os.getenv('SIMULATION_MODE')
-        if simulation_override is not None:
-            self.simulation_mode = simulation_override.lower() == 'true'
+        simulation_env = os.getenv('TRADE_SIMULATION_MODE')
+        legacy_simulation_env = os.getenv('SIMULATION_MODE')
+
+        if simulation_env is not None:
+            self.simulation_mode = simulation_env.lower() == 'true'
+            mode_source = 'TRADE_SIMULATION_MODE'
+        elif legacy_simulation_env is not None:
+            self.simulation_mode = legacy_simulation_env.lower() == 'true'
+            mode_source = 'SIMULATION_MODE'
         else:
             self.simulation_mode = self.config.TESTNET
+            mode_source = 'TESTNET'
 
-        logger.info(f"🔄 Real Trading Executor initialized. Simulation mode: {self.simulation_mode}")
+        logger.info(
+            "🔄 Режим торговли: %s (источник: %s)",
+            'симуляция' if self.simulation_mode else 'реальные ордера',
+            mode_source
+        )
+        logger.info(
+            "📡 Режим котировок Bybit: %s",
+            'testnet' if self.config.TESTNET else 'mainnet'
+        )
+
+        if self.simulation_mode and not self.config.TESTNET:
+            logger.warning(
+                "🧪 Симуляция исполнения сделок при работе с реальными котировками Bybit"
+            )
+            logger.debug(
+                "💳 Тестовый симулированный баланс: %.2f USDT", self._simulated_balance_usdt
+            )
     
     def set_real_mode(self, enable_real_mode):
         """Переключение в реальный режим торговли"""
