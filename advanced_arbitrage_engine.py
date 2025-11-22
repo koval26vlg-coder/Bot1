@@ -532,16 +532,23 @@ class AdvancedArbitrageEngine:
             prioritized_triangles,
             tickers
         )
-        self.optimized_triangles = quick_filtered_triangles
+        max_triangles = getattr(self.config, 'MAX_TRIANGLES_PER_CYCLE', 20)
+        limited_triangles = quick_filtered_triangles[:max_triangles]
+        self.optimized_triangles = limited_triangles
         rejected_by_liquidity += max(0, len(prioritized_triangles) - len(quick_filtered_triangles))
 
-        for triangle in quick_filtered_triangles:
+        for triangle in limited_triangles:
             triangle_name = triangle.get('name', 'triangle')
             try:
                 # Проверяем доступность всех пар
                 if not all(leg in tickers for leg in triangle['legs']):
                     continue
-                
+
+                # Быстрая проверка ликвидности по котировкам без обращения к стакану
+                if not self._quick_triangle_liquidity_check(triangle, tickers):
+                    rejected_by_liquidity += 1
+                    continue
+
                 # Проверяем ликвидность
                 if not self._check_liquidity(triangle, tickers):
                     rejected_by_liquidity += 1
@@ -943,6 +950,62 @@ class AdvancedArbitrageEngine:
         except (ZeroDivisionError, ValueError) as e:
             logger.debug(f"Profit calculation error: {str(e)}")
             return -100
+
+    def _quick_triangle_liquidity_check(self, triangle, tickers):
+        """Упрощенная проверка ликвидности на основе bid/ask и спреда"""
+        max_spread = getattr(self.config, 'MAX_SPREAD_PERCENT', 10)
+        planned_amount = getattr(self.config, 'TRADE_AMOUNT', 0) or getattr(self.config, 'MIN_LIQUIDITY', 0)
+        minimum_threshold = max(getattr(self.config, 'MIN_LIQUIDITY', 0) * 0.5, planned_amount * 0.25)
+
+        for symbol in triangle['legs']:
+            ticker = tickers.get(symbol)
+            if not ticker:
+                logger.debug("Пропускаем %s из-за отсутствия тикера %s", triangle.get('name', 'triangle'), symbol)
+                return False
+
+            bid = float(ticker.get('bid', 0) or 0)
+            ask = float(ticker.get('ask', 0) or 0)
+
+            if bid <= 0 or ask <= 0 or ask < bid:
+                logger.debug("Невалидные котировки для %s: bid=%s, ask=%s", symbol, bid, ask)
+                return False
+
+            spread_percent = ((ask - bid) / bid) * 100
+            if spread_percent > max_spread:
+                logger.debug(
+                    "Слишком широкий спред для %s: %.2f%% (лимит %.2f%%)",
+                    symbol,
+                    spread_percent,
+                    max_spread
+                )
+                return False
+
+            bid_volume = float(
+                ticker.get('bid_size')
+                or ticker.get('bid_qty')
+                or ticker.get('bid_volume')
+                or ticker.get('bidVol')
+                or 0
+            )
+            ask_volume = float(
+                ticker.get('ask_size')
+                or ticker.get('ask_qty')
+                or ticker.get('ask_volume')
+                or ticker.get('askVol')
+                or 0
+            )
+
+            available_notional = max(bid * bid_volume, ask * ask_volume)
+            if available_notional and available_notional < minimum_threshold:
+                logger.debug(
+                    "Недостаточный объём по %s: доступно %.2f, требуется минимум %.2f",
+                    symbol,
+                    available_notional,
+                    minimum_threshold
+                )
+                return False
+
+        return True
 
     def _check_liquidity(self, triangle, tickers):
         """Проверка ликвидности для треугольника"""
