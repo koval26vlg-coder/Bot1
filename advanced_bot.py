@@ -1,11 +1,12 @@
-import time
 import logging
+import time
 import signal
 import sys
 import os
 import importlib
 from pathlib import Path
 from datetime import datetime
+import inspect
 
 # 👇 Гарантируем, что локальная папка проекта всегда есть в sys.path,
 #    чтобы импорты работали даже при запуске скрипта из другой директории
@@ -122,6 +123,12 @@ def main():
     logger.info("=" * 70)
 
     ensure_psutil_available()
+
+    engine_module_path = Path(inspect.getfile(AdvancedArbitrageEngine)).resolve()
+    if PROJECT_ROOT not in engine_module_path.parents and PROJECT_ROOT != engine_module_path:
+        logger.warning("⚠️ AdvancedArbitrageEngine импортирован не из корня проекта: %s", engine_module_path)
+    else:
+        logger.info("📂 Используется локальная версия AdvancedArbitrageEngine: %s", engine_module_path)
 
     engine = AdvancedArbitrageEngine()
     killer = GracefulKiller()

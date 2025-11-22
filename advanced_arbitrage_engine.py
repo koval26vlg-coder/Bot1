@@ -1,8 +1,10 @@
+import inspect
 import logging
 import time
 from collections import defaultdict, deque
 from datetime import datetime
 from itertools import permutations
+from pathlib import Path
 
 from bybit_client import BybitClient
 from config import Config
@@ -19,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 class AdvancedArbitrageEngine:
     def __init__(self):
+        self._log_module_origin()
+        self._ensure_integrity()
+
         self.config = Config()
         self._validate_config()
 
@@ -39,6 +44,25 @@ class AdvancedArbitrageEngine:
 
         self.monitor.start_monitoring_loop()
         logger.info("🚀 Advanced Triangular Arbitrage Engine initialized")
+
+    def _log_module_origin(self):
+        """Фиксирует путь к модулю, откуда загружен движок."""
+        module_path = Path(__file__).resolve()
+        logger.info("📂 AdvancedArbitrageEngine загружен из %s", module_path)
+
+    def _ensure_integrity(self):
+        """Проверяет наличие и исходник критичных методов."""
+        if not hasattr(self.__class__, "_initialize_triangle_stats"):
+            raise AttributeError("Метод _initialize_triangle_stats не найден в AdvancedArbitrageEngine")
+
+        method = getattr(self.__class__, "_initialize_triangle_stats")
+        method_file = Path(inspect.getsourcefile(method)).resolve()
+        module_path = Path(__file__).resolve()
+
+        if method_file != module_path:
+            raise ImportError(
+                f"Метод _initialize_triangle_stats загружен из другого файла: {method_file}. Ожидался {module_path}"
+            )
 
     def _initialize_data_structures(self):
         """Вынос инициализации структур данных в отдельный метод."""
