@@ -5,7 +5,12 @@ import logging
 import os
 import time
 
-import bot_bundle as bundle
+import bot_bundle
+from bot_bundle import OptimizedConfig, AdvancedArbitrageEngine
+
+
+# Функция advanced_main получает функцию main из advanced_bot внутри монолитного bot_bundle
+advanced_main = bot_bundle.main
 
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -39,11 +44,11 @@ def _prepare_aggressive_env(min_profit: float | None, trade_amount: float | None
     os.environ.setdefault("TRADE_AMOUNT", str(effective_trade_amount))
 
 
-def _prepare_quick_config(min_profit: float | None, trade_amount: float | None) -> bundle.OptimizedConfig:
+def _prepare_quick_config(min_profit: float | None, trade_amount: float | None) -> OptimizedConfig:
     """Создает конфигурацию для быстрого тестового цикла."""
 
     os.environ["TESTNET"] = "true"
-    optimized = bundle.OptimizedConfig()
+    optimized = OptimizedConfig()
     optimized.TESTNET = True
 
     if min_profit is not None:
@@ -82,7 +87,7 @@ def _run_standard_mode(args) -> None:
     _configure_logging(args.log_level)
     _apply_threshold_overrides(args.min_profit, args.trade_amount)
 
-    bundle.main()
+    advanced_main()
 
 
 def _run_aggressive_mode(args) -> None:
@@ -91,7 +96,7 @@ def _run_aggressive_mode(args) -> None:
     _configure_logging(args.log_level)
     _prepare_aggressive_env(args.min_profit, args.trade_amount)
 
-    bundle.main()
+    advanced_main()
 
 
 def _run_quick_mode(args) -> None:
@@ -100,7 +105,7 @@ def _run_quick_mode(args) -> None:
     _configure_logging(args.log_level)
     optimized_config = _prepare_quick_config(args.min_profit, args.trade_amount)
 
-    engine = bundle.AdvancedArbitrageEngine()
+    engine = AdvancedArbitrageEngine()
     engine.config = optimized_config
 
     logging.info("Запуск тестового цикла обнаружения возможностей")
