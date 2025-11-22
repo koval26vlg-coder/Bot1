@@ -15,8 +15,8 @@ class OptimizedConfig(Config):
         if self._min_triangular_profit_override is not None:
             return self._min_triangular_profit_override
         if self.TESTNET:
-            return 0.03
-        return Config.MIN_TRIANGULAR_PROFIT.fget(self)
+            return 0.01
+        return 0.05
 
     @property
     def UPDATE_INTERVAL(self):
