@@ -20,13 +20,28 @@ logger = logging.getLogger(__name__)
 class AdvancedArbitrageEngine:
     def __init__(self):
         self.config = Config()
+        self._validate_config()
+
         self.client = BybitClient()
         self.monitor = AdvancedMonitor(self)
         self.real_trader = RealTradingExecutor()
         self.strategy_manager = StrategyManager(self.config)
         self.performance_optimizer = PerformanceOptimizer(self.config)
 
-        # Расширенные структуры данных
+        self._initialize_data_structures()
+        self._initialize_triangle_stats()
+
+        # Инициализация всех символов
+        self._initialize_symbols()
+
+        # Предварительная оптимизация списка треугольников
+        self.optimized_triangles = self.performance_optimizer.get_optimized_triangles()
+
+        self.monitor.start_monitoring_loop()
+        logger.info("🚀 Advanced Triangular Arbitrage Engine initialized")
+
+    def _initialize_data_structures(self):
+        """Вынос инициализации структур данных в отдельный метод."""
         self.price_history = {}
         self.volatility_data = {}
         self.trade_history = []
@@ -44,8 +59,9 @@ class AdvancedArbitrageEngine:
         self._last_dynamic_threshold = None
         self._quote_suffix_cache = None
         self.optimized_triangles = []
-        
-        # Статистика по треугольникам
+
+    def _initialize_triangle_stats(self):
+        """Формирует базовую статистику по треугольникам."""
         self.triangle_stats = {}
         for triangle in self.config.TRIANGULAR_PAIRS:
             self.triangle_stats[triangle['name']] = {
@@ -56,18 +72,51 @@ class AdvancedArbitrageEngine:
                 'last_execution': None,
                 'success_rate': 0
             }
-        
-        self.ohlcv_history = {}
-        self.last_strategy_context = {}
 
-        # Инициализация всех символов
-        self._initialize_symbols()
+    def _validate_config(self, config=None):
+        """Быстрая валидация критичных параметров конфигурации."""
+        cfg = config or self.config
+        is_valid = True
 
-        # Предварительная оптимизация списка треугольников
-        self.optimized_triangles = self.performance_optimizer.get_optimized_triangles()
-        
-        self.monitor.start_monitoring_loop()
-        logger.info("🚀 Advanced Triangular Arbitrage Engine initialized")
+        if not cfg.TRIANGULAR_PAIRS:
+            logger.error("❌ Конфигурация не содержит треугольников для арбитража")
+            is_valid = False
+
+        if getattr(cfg, 'MIN_TRIANGULAR_PROFIT', 0) <= 0:
+            logger.warning(
+                "⚠️ MIN_TRIANGULAR_PROFIT должен быть положительным. Текущее значение: %s", cfg.MIN_TRIANGULAR_PROFIT
+            )
+
+        if getattr(cfg, 'UPDATE_INTERVAL', 0) <= 0:
+            logger.warning(
+                "⚠️ UPDATE_INTERVAL должен быть больше нуля. Текущее значение: %s", cfg.UPDATE_INTERVAL
+            )
+
+        if not cfg.API_KEY or not cfg.API_SECRET:
+            logger.warning("🔒 API ключи не заданы или пустые. Торговля может быть недоступна")
+
+        return is_valid
+
+    def reload_config(self):
+        """Перезагрузка конфигурации без перезапуска бота."""
+        try:
+            new_config = Config()
+            if not self._validate_config(new_config):
+                logger.error("❌ Перезагрузка конфигурации отменена из-за ошибок валидации")
+                return False
+
+            self.config = new_config
+            self.strategy_manager.update_config(new_config)
+            self.performance_optimizer.update_config(new_config)
+            self.client = BybitClient()
+            self._initialize_triangle_stats()
+            self._initialize_symbols()
+            self.optimized_triangles = self.performance_optimizer.get_optimized_triangles()
+            logger.info("🔄 Конфигурация успешно перезагружена без рестарта")
+            return True
+        except Exception as exc:
+            logger.exception("Ошибка при перезагрузке конфигурации: %s", exc)
+            return False
 
     def _initialize_symbols(self):
         """Инициализация всех необходимых символов"""

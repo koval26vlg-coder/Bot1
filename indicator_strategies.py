@@ -36,6 +36,10 @@ class StrategyManager:
             'pattern_recognition': self._pattern_recognition_strategy,
         }
 
+    def update_config(self, config):
+        """Обновляет конфигурацию без пересоздания менеджера."""
+        self.config = config
+
     def evaluate(self, market_df: Sequence[dict], context: Dict[str, float]) -> Optional[StrategyResult]:
         best_result: Optional[StrategyResult] = None
         for name, strategy in self._strategies.items():
