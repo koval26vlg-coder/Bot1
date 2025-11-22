@@ -98,14 +98,6 @@ class AdvancedArbitrageEngine:
                 'close': deque(maxlen=500),
                 'volume': deque(maxlen=500)
             }
-            self.ohlcv_history[symbol] = {
-                'timestamps': deque(maxlen=500),
-                'open': deque(maxlen=500),
-                'high': deque(maxlen=500),
-                'low': deque(maxlen=500),
-                'close': deque(maxlen=500),
-                'volume': deque(maxlen=500)
-            }
 
     def update_market_data(self, tickers):
         """Обновление рыночных данных с расширенной аналитикой"""
