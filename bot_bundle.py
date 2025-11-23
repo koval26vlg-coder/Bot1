@@ -2510,6 +2510,8 @@ class BybitWebSocketManager:
         self._monitor_thread = None
         self._last_ticker_ts = 0
         self._max_staleness = max(getattr(self.config, '_ticker_staleness_warning', 5.0) * 2, 1.0)
+        # Сегмент рынка заранее синхронизируем с REST-клиентом, чтобы избежать ошибок доступа
+        self.market_category = getattr(self.config, "MARKET_CATEGORY", "spot")
 
     def start(self, symbols):
         """Запуск стримов по списку тикеров."""
