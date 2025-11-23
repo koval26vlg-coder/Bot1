@@ -92,6 +92,11 @@ class Config:
             'TICKER_STALENESS_WARNING_SEC',
             5.0
         )
+        self._simulation_slippage_tolerance = self._load_float_env(
+            'SIMULATION_SLIPPAGE_TOLERANCE',
+            getattr(self, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+        )
+        self._simulation_latency_range = self._load_latency_range()
 
     @property
     def MARKET_CATEGORY(self):
@@ -249,6 +254,16 @@ class Config:
         """Максимально допустимая давность котировок перед предупреждением"""
         return self._ticker_staleness_warning
 
+    @property
+    def SIMULATION_SLIPPAGE_TOLERANCE(self):
+        """Допустимое проскальзывание при симуляции"""
+        return self._simulation_slippage_tolerance
+
+    @property
+    def SIMULATION_LATENCY_RANGE(self):
+        """Диапазон искусственной задержки в секундах для симуляции"""
+        return self._simulation_latency_range
+
     def _load_min_triangular_profit_override(self):
         """Читает переопределение порога прибыли из переменной окружения"""
         raw_value = os.getenv('MIN_TRIANGULAR_PROFIT')
@@ -290,6 +305,42 @@ class Config:
                 default
             )
             return default
+
+    def _load_latency_range(self):
+        """Читает диапазон задержек для симуляции из окружения"""
+        raw_range = os.getenv('SIMULATION_LATENCY_RANGE')
+        if not raw_range:
+            return (0.05, 0.2)
+
+        normalized = raw_range.replace(' ', '').replace(';', ',')
+        parts = [p for p in normalized.split(',') if p]
+
+        if len(parts) != 2:
+            logger.warning(
+                "Некорректный формат SIMULATION_LATENCY_RANGE='%s'. Используем диапазон по умолчанию.",
+                raw_range
+            )
+            return (0.05, 0.2)
+
+        try:
+            start, end = float(parts[0]), float(parts[1])
+        except ValueError:
+            logger.warning(
+                "Не удалось распарсить SIMULATION_LATENCY_RANGE='%s'. Используем диапазон по умолчанию.",
+                raw_range
+            )
+            return (0.05, 0.2)
+
+        if start < 0 or end < 0:
+            logger.warning(
+                "Задержка не может быть отрицательной. Используем диапазон по умолчанию."
+            )
+            return (0.05, 0.2)
+
+        if start > end:
+            start, end = end, start
+
+        return (start, end)
 
     def _build_triangle_templates(self):
         """Создает список потенциальных треугольников, согласованный с реальными тикерами"""
@@ -5732,6 +5783,7 @@ if __name__ == "__main__":
 import logging
 import time
 import threading
+import random
 from collections import deque
 from datetime import datetime
 import os  # Исправлено: добавлен импорт os
@@ -6404,26 +6456,73 @@ class RealTradingExecutor:
     def _simulate_trade(self, trade_plan):
         """Симуляция торговли"""
         logger.info("🧪 SIMULATION MODE: Симуляция исполнения ордеров")
-        
+
         results = []
         total_profit = 0
-        
+        slippage_tolerance = getattr(
+            self.config,
+            'SIMULATION_SLIPPAGE_TOLERANCE',
+            getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+        )
+        latency_range = getattr(self.config, 'SIMULATION_LATENCY_RANGE', (0.05, 0.2))
+
         for step_name, step in trade_plan.items():
             if step_name.startswith('step') or step_name in ['leg1', 'leg2']:
+                latency = 0.0
+                if isinstance(latency_range, (list, tuple)) and len(latency_range) == 2:
+                    latency = max(0.0, random.uniform(latency_range[0], latency_range[1]))
+                    time.sleep(latency)
+                    logger.info(
+                        "⏱️ Имитируем сетевую задержку %.3fс перед шагом %s",
+                        latency,
+                        step_name
+                    )
+
+                market_price, ticker_snapshot = self._get_live_price(step['symbol'], step['side'])
+                base_price = float(step.get('price') or 0)
+                if market_price:
+                    base_price = market_price
+
+                slippage = max(0.0, min(slippage_tolerance, random.uniform(0, slippage_tolerance)))
+
+                if base_price > 0:
+                    if (step.get('side') or '').lower() == 'buy':
+                        execution_price = base_price * (1 + slippage)
+                    else:
+                        execution_price = base_price * (1 - slippage)
+                else:
+                    execution_price = base_price
+
+                logger.info(
+                    "📉 Применено проскальзывание %.4f%% для %s: базовая цена %.6f -> %.6f",
+                    slippage * 100,
+                    step['symbol'],
+                    base_price,
+                    execution_price if execution_price else base_price
+                )
+
                 simulated_result = {
                     'orderId': f"sim_{int(time.time())}_{step_name}",
                     'orderStatus': 'Filled',
                     'symbol': step['symbol'],
                     'side': step['side'],
                     'qty': step['amount'],
-                    'price': step['price'],
-                    'avgPrice': step['price'],
+                    'price': execution_price or step['price'],
+                    'avgPrice': execution_price or step['price'],
                     'cumExecQty': step['amount'],
                     'simulated': True,
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': datetime.now().isoformat(),
+                    'applied_slippage': slippage,
+                    'simulated_latency': latency
                 }
                 results.append(simulated_result)
-                logger.info(f"✅ SIMULATED: {step['side']} {step['amount']:.6f} {step['symbol']} @ {step['price']:.2f}")
+                logger.info(
+                    "✅ SIMULATED: %s %.6f %s @ %.2f",
+                    step['side'],
+                    step['amount'],
+                    step['symbol'],
+                    execution_price or step['price']
+                )
         
         # Расчет прибыли для симуляции
         if 'estimated_profit_usdt' in trade_plan:
