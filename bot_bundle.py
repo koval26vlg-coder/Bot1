@@ -2830,8 +2830,18 @@ class BybitClient:
         except (TypeError, ValueError):
             return default
     
-    def place_order(self, symbol, side, qty, price=None, order_type='Market'):
-        """Размещение ордера на бирже с улучшенной обработкой ошибок"""
+    def place_order(
+        self,
+        symbol,
+        side,
+        qty,
+        price=None,
+        order_type='Market',
+        trigger_price=None,
+        trigger_by='LastPrice',
+        reduce_only=False,
+    ):
+        """Размещение ордера на бирже с улучшенной обработкой ошибок и поддержкой контингентных триггеров"""
         try:
             # Проверка минимальных объемов для тестнета
             if self.config.TESTNET:
@@ -2847,11 +2857,17 @@ class BybitClient:
                 'qty': str(qty),
                 'timeInForce': 'GTC' if order_type == 'Limit' else 'IOC',
                 'isLeverage': 0,
-                'orderFilter': 'Order'
+                'orderFilter': 'Order',
+                'reduceOnly': 1 if reduce_only else 0,
             }
-            
+
             if price and order_type == 'Limit':
                 params['price'] = str(price)
+
+            if trigger_price is not None:
+                params['triggerPrice'] = str(trigger_price)
+                params['triggerBy'] = trigger_by
+                params['orderFilter'] = 'tpslOrder' if order_type.lower() != 'market' else 'Order'
             
             logger.info(f"🚀 Placing {order_type} order: {params}")
             
@@ -5280,6 +5296,243 @@ class RiskManager:
         if self.consecutive_losses > self.max_consecutive_losses:
             logger.critical(f"🔥 Достигнуто максимальное количество убыточных сделок подряд: {self.consecutive_losses}")
 
+
+class ContingentOrderOrchestrator:
+    """Оркестратор контингентных ордеров и поэтапного исполнения с хеджированием"""
+
+    def __init__(self, client: BybitClient, config: Config):
+        self.client = client
+        self.config = config
+        self.default_timeout = getattr(config, 'MAX_TRIANGLE_EXECUTION_TIME', 30)
+        self.loss_limit_usdt = float(os.getenv('CONTINGENT_MAX_LOSS_USDT', '10'))
+
+    def execute_sequence(self, legs: list[dict], hedge_leg: dict | None = None, max_loss_usdt: float | None = None, timeout: int | None = None):
+        """Выполняет цепочку ног с проверкой статусов и хеджем при сбоях"""
+
+        if not legs:
+            logger.warning("⚠️ Передан пустой список ног для оркестратора")
+            return None
+
+        timeout_sec = timeout or self.default_timeout
+        loss_cap = max_loss_usdt if max_loss_usdt is not None else self.loss_limit_usdt
+
+        executed_orders = []
+        hedge_actions = []
+        amount_scale = 1.0
+
+        for idx, leg in enumerate(legs, start=1):
+            leg_payload = dict(leg)
+            leg_payload['amount'] = float(leg_payload.get('amount', 0) or 0) * amount_scale
+
+            logger.info("🧭 Оркестратор: шаг %s/%s для %s", idx, len(legs), leg_payload.get('symbol'))
+            order_result, status, fill_ratio = self._place_and_monitor(leg_payload, timeout_sec)
+
+            if order_result:
+                executed_orders.append(order_result)
+
+            if status in {'timeout', 'cancelled', 'failed'} or fill_ratio <= 0:
+                hedge = self._apply_hedge(hedge_leg, leg_payload, executed_orders, loss_cap, reason="сбой шага")
+                if hedge:
+                    hedge_actions.append(hedge)
+                return self._build_report('failed', executed_orders, hedge_actions, amount_scale, loss_cap)
+
+            if status == 'partial' and fill_ratio < 1.0:
+                amount_scale *= fill_ratio
+                hedge = self._apply_hedge(
+                    hedge_leg,
+                    leg_payload,
+                    executed_orders,
+                    loss_cap,
+                    reason="частичное исполнение",
+                    unfilled_ratio=1 - fill_ratio,
+                )
+                if hedge:
+                    hedge_actions.append(hedge)
+
+        return self._build_report('completed', executed_orders, hedge_actions, amount_scale, loss_cap)
+
+    def _place_and_monitor(self, leg: dict, timeout_sec: int):
+        """Размещает ордер и ждёт его исполнения или тайм-аута"""
+
+        order = self.client.place_order(
+            symbol=leg['symbol'],
+            side=leg['side'],
+            qty=leg['amount'],
+            price=leg.get('price'),
+            order_type=leg.get('type', 'Market'),
+            trigger_price=leg.get('trigger_price'),
+            trigger_by=leg.get('trigger_by', 'LastPrice'),
+            reduce_only=leg.get('reduce_only', False),
+        )
+
+        if not order:
+            logger.error("❌ Ордер шага не размещён")
+            return None, 'failed', 0.0
+
+        order_id = order.get('orderId')
+        symbol = leg['symbol']
+        status = self._normalize_status(order.get('orderStatus'))
+        fill_ratio = self._calc_fill_ratio(order)
+
+        if status in {'filled', 'cancelled'} or not order_id:
+            return order, status, fill_ratio
+
+        start_time = time.time()
+        last_status = status
+
+        while time.time() - start_time < timeout_sec:
+            fetched = self.client.get_order_status(order_id, symbol) or {}
+            if fetched:
+                order.update(fetched)
+                last_status = self._normalize_status(fetched.get('orderStatus'))
+                fill_ratio = self._calc_fill_ratio(fetched)
+
+                if last_status in {'filled', 'cancelled'}:
+                    return order, last_status, fill_ratio
+
+            time.sleep(1)
+
+        logger.error("⏳ Тайм-аут исполнения ордера %s", order_id)
+        return order, last_status or 'timeout', fill_ratio
+
+    def _apply_hedge(self, hedge_leg, failed_leg, executed_orders, loss_cap, reason: str, unfilled_ratio: float | None = None):
+        """Проводит компенсирующее действие при сбое или частичном исполнении"""
+
+        hedge_payload = self._prepare_hedge_payload(hedge_leg, failed_leg, executed_orders, loss_cap, unfilled_ratio)
+        if not hedge_payload:
+            logger.warning("⚠️ Хедж не выполнен: нет подходящего payload")
+            return None
+
+        logger.warning("🛡️ Запуск хеджа (%s) для %s", reason, hedge_payload['symbol'])
+        hedge_result = self.client.place_order(**hedge_payload)
+
+        if hedge_result:
+            hedge_status = self._normalize_status(hedge_result.get('orderStatus'))
+            return {
+                'reason': reason,
+                'payload': hedge_payload,
+                'result': hedge_result,
+                'status': hedge_status,
+            }
+
+        logger.error("❌ Хедж не размещён")
+        return None
+
+    def _prepare_hedge_payload(self, hedge_leg, failed_leg, executed_orders, loss_cap, unfilled_ratio):
+        """Формирует параметры хедж-ордера, ограничивая риск по сумме"""
+
+        last_fill = self._extract_last_fill(executed_orders, failed_leg)
+        if not last_fill:
+            return None
+
+        qty, price, symbol, side = last_fill
+        target_symbol = (hedge_leg or {}).get('symbol', symbol)
+        target_side = (hedge_leg or {}).get('side')
+
+        hedge_side = target_side or ('sell' if side.lower() == 'buy' else 'buy')
+        hedge_price = (hedge_leg or {}).get('price', price)
+        hedge_type = (hedge_leg or {}).get('type', 'Market')
+
+        effective_unfilled = qty * (unfilled_ratio or 1.0)
+        capped_qty = self._cap_qty_by_loss(effective_unfilled, hedge_price, loss_cap)
+        if capped_qty <= 0:
+            return None
+
+        return {
+            'symbol': target_symbol,
+            'side': hedge_side,
+            'qty': capped_qty,
+            'price': hedge_price,
+            'order_type': hedge_type,
+            'reduce_only': True,
+        }
+
+    def _extract_last_fill(self, executed_orders, fallback_leg):
+        """Извлекает информацию о последнем исполненном объёме"""
+
+        source = executed_orders[-1] if executed_orders else None
+        if not source and fallback_leg:
+            qty = float(fallback_leg.get('amount', 0) or 0)
+            price = float(fallback_leg.get('price', 0) or 0)
+            return qty, price, fallback_leg.get('symbol'), fallback_leg.get('side', '')
+
+        if not source:
+            return None
+
+        qty = self._safe_float(source.get('cumExecQty') or source.get('qty'))
+        price = self._safe_float(source.get('avgPrice') or source.get('price'))
+        symbol = source.get('symbol') or fallback_leg.get('symbol')
+        side = source.get('side') or fallback_leg.get('side', '')
+        return qty, price, symbol, side
+
+    def _cap_qty_by_loss(self, qty: float, price: float | None, loss_cap: float) -> float:
+        """Ограничивает объём для хеджа, чтобы потенциальный убыток не превысил лимит"""
+
+        if not price or price <= 0 or loss_cap <= 0:
+            return qty
+
+        max_qty = loss_cap / price
+        return min(qty, max_qty)
+
+    def _calc_fill_ratio(self, order_data: dict) -> float:
+        """Рассчитывает долю исполнения ордера"""
+
+        qty = self._safe_float(order_data.get('qty'))
+        filled = self._safe_float(order_data.get('cumExecQty'))
+        if qty <= 0:
+            return 0.0
+        return min(1.0, filled / qty)
+
+    def _normalize_status(self, status: str | None) -> str:
+        """Приводит статус ордера к нормализованной форме"""
+
+        if not status:
+            return 'unknown'
+        status_lower = status.lower()
+        if 'partial' in status_lower:
+            return 'partial'
+        if 'cancel' in status_lower:
+            return 'cancelled'
+        if 'filled' in status_lower:
+            return 'filled'
+        return status_lower
+
+    def _safe_float(self, value, default=0.0):
+        """Безопасное преобразование к float"""
+
+        try:
+            if value is None:
+                return default
+            if isinstance(value, str):
+                value = value.strip()
+                if value == '':
+                    return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _build_report(self, status, executed_orders, hedges, amount_scale, loss_cap=None):
+        """Формирует итоговый отчёт по цепочке"""
+
+        hedge_cost = 0.0
+        for hedge in hedges or []:
+            payload = hedge.get('payload') or {}
+            hedge_cost += self._safe_float(payload.get('price')) * self._safe_float(payload.get('qty'))
+
+        estimated_profit = 0.0
+        if hedge_cost > 0:
+            limit = loss_cap if loss_cap is not None else hedge_cost
+            estimated_profit = -min(limit, hedge_cost)
+
+        return {
+            'status': status,
+            'executed': executed_orders,
+            'hedges': hedges,
+            'effective_scale': amount_scale,
+            'estimated_profit': estimated_profit,
+        }
+
+
 class RealTradingExecutor:
     """Исполнение реальных ордеров с режимом симуляции и постепенного перехода к реальной торговле"""
     
@@ -5289,6 +5542,7 @@ class RealTradingExecutor:
         self.is_real_mode = False
         self.trade_history = []
         self.risk_manager = RiskManager()
+        self.contingent_orchestrator = ContingentOrderOrchestrator(self.client, self.config)
         # Фиктивный баланс для симуляции, чтобы можно было управлять проверками ликвидности
         self._simulated_balance_usdt = self._load_simulated_balance()
         self.recent_order_events = deque(maxlen=200)
@@ -5360,6 +5614,43 @@ class RealTradingExecutor:
             return self._simulate_trade(trade_plan)
         else:
             return self._execute_real_trade(trade_plan)
+
+    def execute_orchestrated_trade(self, legs: list[dict], hedge_leg: dict | None = None, max_loss_usdt: float | None = None, timeout: int | None = None):
+        """Запуск оркестратора контингентных цепочек с учётом риск-менеджмента"""
+
+        if not legs:
+            logger.warning("⚠️ Невозможно запустить оркестратор без списка ног")
+            return None
+
+        safety_plan = {'estimated_profit_usdt': max(0.02, (max_loss_usdt or 0) * -1)}
+        if not self.risk_manager.can_execute_trade(safety_plan):
+            logger.error("❌ Риск-менеджер запретил запуск оркестратора")
+            return None
+
+        result = self.contingent_orchestrator.execute_sequence(legs, hedge_leg, max_loss_usdt, timeout)
+        if not result:
+            return None
+
+        trade_record = {
+            'timestamp': datetime.now(),
+            'trade_plan': {'legs': legs, 'hedge': hedge_leg, 'max_loss_usdt': max_loss_usdt, 'timeout': timeout},
+            'results': result.get('executed'),
+            'hedges': result.get('hedges'),
+            'status': result.get('status'),
+            'total_profit': result.get('estimated_profit', 0),
+            'simulated': self.simulation_mode,
+        }
+
+        self.trade_history.append(trade_record)
+        if not self.simulation_mode:
+            self.risk_manager.update_after_trade(trade_record)
+
+        logger.info(
+            "🏁 Оркестратор завершён со статусом %s (хеджей: %s)",
+            trade_record['status'],
+            len(trade_record.get('hedges') or []),
+        )
+        return trade_record
 
     def get_balance(self, coin='USDT'):
         """Возвращает баланс в зависимости от режима исполнения"""
