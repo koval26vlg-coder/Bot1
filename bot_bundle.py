@@ -3656,7 +3656,8 @@ class AdvancedArbitrageEngine:
                     recalculated_profit = self._calculate_triangular_profit_path(
                         prices,
                         best_direction['path'],
-                        base_currency
+                        base_currency,
+                        trade_amount=getattr(self.config, 'TRADE_AMOUNT', None)
                     )
                     best_direction['profit_percent'] = recalculated_profit
                 self._last_candidates.append({
@@ -3798,7 +3799,12 @@ class AdvancedArbitrageEngine:
         if not path:
             profit = -100
         else:
-            profit = self._calculate_triangular_profit_path(prices, path, base_currency)
+            profit = self._calculate_triangular_profit_path(
+                prices,
+                path,
+                base_currency,
+                trade_amount=getattr(self.config, 'TRADE_AMOUNT', None)
+            )
 
         return {
             'direction': direction,
@@ -3964,12 +3970,106 @@ class AdvancedArbitrageEngine:
         midpoint = len(symbol) // 2
         return symbol[:midpoint], symbol[midpoint:]
 
-    def _calculate_triangular_profit_path(self, prices, path, base_currency):
-        """Расчет прибыли для конкретного пути с контролем валют"""
+    def _calculate_triangular_profit_path(self, prices, path, base_currency, trade_amount=None):
+        """Расчет прибыли по пути с учётом доступных объёмов, комиссий и проскальзывания"""
         try:
-            initial_amount = 1000.0  # Базовый расчет на 1000 USDT
+            fee_rate = getattr(self.config, 'TRADING_FEE', 0)
+            slippage_buffer = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+            initial_amount = float(trade_amount or getattr(self.config, 'TRADE_AMOUNT', 0) or 1000.0)
             current_amount = initial_amount
             current_asset = base_currency
+
+            def _normalize_levels(levels):
+                """Нормализация уровней стакана в формат со стандартными ключами"""
+                normalized = []
+                for level in levels or []:
+                    if isinstance(level, dict):
+                        price = self._safe_float(level.get('price'))
+                        size = self._safe_float(level.get('size'))
+                    elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                        price = self._safe_float(level[0])
+                        size = self._safe_float(level[1])
+                    else:
+                        continue
+
+                    if price > 0 and size > 0:
+                        normalized.append({'price': price, 'size': size})
+                return normalized
+
+            def _estimate_execution(side, price_data, amount, price_type):
+                """Оценка средней цены исполнения с проверкой объёмов и проскальзывания"""
+                best_price = price_data['ask'] if price_type == 'ask' else price_data['bid']
+                if best_price <= 0:
+                    return None, None
+
+                best_volume = self._safe_float(
+                    price_data.get('ask_size') if price_type == 'ask' else price_data.get('bid_size')
+                )
+
+                depth_key = 'asks' if price_type == 'ask' else 'bids'
+                depth = _normalize_levels(price_data.get(depth_key) or price_data.get('order_book', {}).get(depth_key))
+
+                if side == 'Buy':
+                    remaining_quote = amount
+                    acquired_base = 0.0
+
+                    def _consume(price, size):
+                        nonlocal remaining_quote, acquired_base
+                        if remaining_quote <= 0:
+                            return
+                        max_base_for_quote = remaining_quote / price
+                        taken_base = min(size, max_base_for_quote)
+                        acquired_base += taken_base
+                        remaining_quote -= taken_base * price
+
+                    if best_volume > 0:
+                        _consume(best_price, best_volume)
+
+                    if remaining_quote > 0 and depth:
+                        for level in depth:
+                            _consume(level['price'], level['size'])
+                            if remaining_quote <= 0:
+                                break
+
+                    if remaining_quote > 0 and acquired_base > 0:
+                        worse_price = best_price * (1 + slippage_buffer)
+                        acquired_base += (remaining_quote / worse_price)
+                        remaining_quote = 0
+
+                    if acquired_base <= 0:
+                        return None, None
+
+                    spent_quote = amount - remaining_quote
+                    effective_price = spent_quote / acquired_base if acquired_base > 0 else None
+                    return effective_price, acquired_base
+
+                remaining_base = amount
+                realized_quote = 0.0
+
+                def _sell_consume(price, size):
+                    nonlocal remaining_base, realized_quote
+                    if remaining_base <= 0:
+                        return
+                    sold_base = min(size, remaining_base)
+                    realized_quote += sold_base * price
+                    remaining_base -= sold_base
+
+                if best_volume > 0:
+                    _sell_consume(best_price, best_volume)
+
+                if remaining_base > 0 and depth:
+                    for level in depth:
+                        _sell_consume(level['price'], level['size'])
+                        if remaining_base <= 0:
+                            break
+
+                if remaining_base > 0:
+                    worse_price = best_price * (1 - slippage_buffer)
+                    realized_quote += remaining_base * worse_price
+                    remaining_base = 0
+
+                effective_price = realized_quote / amount if amount > 0 else None
+                return effective_price, amount
 
             for step in path:
                 symbol = step['symbol']
@@ -3984,13 +4084,11 @@ class AdvancedArbitrageEngine:
                         )
                         return -100
 
-                    price = price_data['ask'] if step['price_type'] == 'ask' else price_data['bid']
-                    if price <= 0:
+                    price, acquired = _estimate_execution('Buy', price_data, current_amount, step['price_type'])
+                    if not price or not acquired:
                         return -100
-                    # Покупаем: количество = текущая сумма / цена
-                    quantity = current_amount / price
-                    # Применяем комиссию
-                    quantity *= (1 - self.config.TRADING_FEE)
+
+                    quantity = acquired * (1 - fee_rate)
                     current_amount = quantity
                     current_asset = symbol_base
                 else:  # Sell
@@ -4000,18 +4098,18 @@ class AdvancedArbitrageEngine:
                             f" но текущая валюта {current_asset}"
                         )
                         return -100
-                    price = price_data['bid'] if step['price_type'] == 'bid' else price_data['ask']
-                    if price <= 0:
+
+                    price, executed_amount = _estimate_execution('Sell', price_data, current_amount, step['price_type'])
+                    if not price or not executed_amount:
                         return -100
-                    # Продаем: сумма = количество * цена
-                    current_amount = current_amount * price
-                    # Применяем комиссию
-                    current_amount *= (1 - self.config.TRADING_FEE)
+
+                    proceeds = (executed_amount * price) * (1 - fee_rate)
+                    current_amount = proceeds
                     current_asset = symbol_quote
-                    
+
             profit_percent = ((current_amount - initial_amount) / initial_amount) * 100
             return profit_percent
-            
+
         except (ZeroDivisionError, ValueError) as e:
             logger.debug(f"Profit calculation error: {str(e)}")
             return -100
