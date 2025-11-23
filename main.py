@@ -6,7 +6,7 @@ import os
 import time
 
 import bot_bundle
-from bot_bundle import OptimizedConfig, AdvancedArbitrageEngine
+from bot_bundle import AdvancedArbitrageEngine, HistoricalReplayer, OptimizedConfig
 
 
 # Функция advanced_main получает функцию main из advanced_bot внутри монолитного bot_bundle
@@ -111,21 +111,46 @@ def _run_quick_mode(args) -> None:
     _quick_test(engine)
 
 
+def _run_replay_mode(args) -> None:
+    """Стресс-тест движка на исторических данных (режим replay)."""
+
+    _configure_logging(args.log_level)
+    os.environ.setdefault("SIMULATION_MODE", "true")
+    os.environ.setdefault("PAPER_TRADING_MODE", "true")
+
+    engine = AdvancedArbitrageEngine()
+    data_path = args.replay_path or getattr(engine.config, "REPLAY_DATA_PATH", None)
+
+    if not data_path:
+        logging.error(
+            "Для режима replay требуется указать путь к файлу через --replay-path или переменную REPLAY_DATA_PATH"
+        )
+        return
+
+    replayer = HistoricalReplayer(
+        engine,
+        data_path,
+        speed=args.replay_speed or getattr(engine.config, "REPLAY_SPEED", 1.0),
+        max_records=args.replay_limit or getattr(engine.config, "REPLAY_MAX_RECORDS", None),
+    )
+    replayer.replay()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Создает CLI-парсер для выбора режимов и порогов."""
 
     parser = argparse.ArgumentParser(
         description=(
-            "Универсальная точка входа для стандартного запуска, агрессивного режима "
-            "или быстрого тестового цикла."
+            "Универсальная точка входа для стандартного запуска, агрессивного режима, "
+            "быстрого тестового цикла или исторического replay."
         )
     )
 
     parser.add_argument(
         "--mode",
-        choices=["standard", "aggressive", "quick"],
+        choices=["standard", "aggressive", "quick", "replay"],
         default="standard",
-        help="Выбор режима: стандартный, агрессивный или быстрый тест",
+        help="Выбор режима: стандартный, агрессивный, быстрый тест или replay",
     )
     parser.add_argument(
         "--min-profit",
@@ -144,6 +169,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default="INFO",
         help="Уровень логирования (например, INFO или DEBUG)",
     )
+    parser.add_argument(
+        "--replay-path",
+        default=None,
+        help="Путь к CSV с историческими котировками для режима replay",
+    )
+    parser.add_argument(
+        "--replay-speed",
+        type=float,
+        default=None,
+        help="Коэффициент ускорения воспроизведения исторических данных",
+    )
+    parser.add_argument(
+        "--replay-limit",
+        type=int,
+        default=None,
+        help="Ограничение числа записей для быстрого стресс-теста",
+    )
 
     return parser
 
@@ -158,6 +200,8 @@ def main() -> None:
         _run_aggressive_mode(args)
     elif args.mode == "quick":
         _run_quick_mode(args)
+    elif args.mode == "replay":
+        _run_replay_mode(args)
     else:
         _run_standard_mode(args)
 

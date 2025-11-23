@@ -113,6 +113,12 @@ class Config:
             'SIMULATION_AUTO_COMPLETE_PARTIALS',
             'true',
         ).lower() == 'true'
+        self.WEBSOCKET_PRICE_ONLY = os.getenv('WEBSOCKET_PRICE_ONLY', 'false').lower() == 'true'
+        self.PAPER_TRADING_MODE = os.getenv('PAPER_TRADING_MODE', 'false').lower() == 'true'
+        self.PAPER_BOOK_IMPACT = self._load_float_env('PAPER_BOOK_IMPACT', 0.05)
+        self.REPLAY_DATA_PATH = os.getenv('REPLAY_DATA_PATH')
+        self.REPLAY_SPEED = self._load_float_env('REPLAY_SPEED', 1.0)
+        self.REPLAY_MAX_RECORDS = self._load_int_env('REPLAY_MAX_RECORDS', 0)
 
     @property
     def MARKET_CATEGORY(self):
@@ -339,6 +345,24 @@ class Config:
                 var_name,
                 raw_value,
                 default
+            )
+            return default
+
+    def _load_int_env(self, var_name, default: int) -> int:
+        """Читает целочисленный параметр из окружения с фолбэком."""
+
+        raw_value = os.getenv(var_name)
+        if raw_value is None:
+            return default
+
+        try:
+            return int(raw_value)
+        except ValueError:
+            logger.warning(
+                "Некорректное значение %s='%s'. Используем целочисленный дефолт %s.",
+                var_name,
+                raw_value,
+                default,
             )
             return default
 
@@ -2785,6 +2809,13 @@ class BybitClient:
                 self._validate_ticker_freshness(tickers)
                 return tickers
 
+        if getattr(self.config, 'WEBSOCKET_PRICE_ONLY', False) and remaining_symbols:
+            logger.warning(
+                "📡 Включён режим WEBSOCKET_PRICE_ONLY, пропускаем REST для %s тикеров", len(remaining_symbols)
+            )
+            self._validate_ticker_freshness(tickers)
+            return tickers
+
         logger.debug(f"🔍 Requesting {len(requested_symbols)} symbols: {requested_symbols}")
 
         start_time = time.time()
@@ -3346,6 +3377,7 @@ class BybitClient:
 # ==== Конец bybit_client.py ====
 
 # ==== Начало advanced_arbitrage_engine.py ====
+import csv
 import inspect
 import logging
 import time
@@ -5783,7 +5815,7 @@ def main():
         logger.critical(f"🔥 Bot crashed unexpectedly: {str(e)}", exc_info=True)
     finally:
         logger.info("🔧 Bot shutdown complete")
-        
+
         # Финальные отчеты и экспорт
         if hasattr(engine, 'monitor') and hasattr(engine.monitor, 'export_trade_history'):
             engine.monitor.export_trade_history()
@@ -5802,14 +5834,92 @@ def main():
                 key=lambda x: x[1]['total_profit'],
                 reverse=True
             )[:3]
-            
+
             logger.info("🏆 TOP 3 TRIANGLES:")
             for name, stats in best_triangles:
-                logger.info(f"   {name}: {stats['executed_trades']} trades, "
-                          f"{stats['total_profit']:.4f} USDT profit, "
-                          f"{stats['success_rate']:.1%} success rate")
-        
+                logger.info(
+                    f"   {name}: {stats['executed_trades']} trades, "
+                    f"{stats['total_profit']:.4f} USDT profit, "
+                    f"{stats['success_rate']:.1%} success rate"
+                )
+
         logger.info("=" * 70)
+
+
+class HistoricalReplayer:
+    """Стресс-тестирует движок на исторических данных (режим replay)."""
+
+    def __init__(self, engine: AdvancedArbitrageEngine, data_path: str, *, speed: float = 1.0, max_records: int | None = None):
+        self.engine = engine
+        self.data_path = Path(data_path)
+        self.speed = max(speed, 0.001)
+        self.max_records = max_records if max_records and max_records > 0 else None
+
+    def _parse_timestamp(self, raw_ts):
+        """Преобразует строковое время в datetime для корректного воспроизведения задержек."""
+
+        if not raw_ts:
+            return None
+
+        try:
+            return datetime.fromisoformat(raw_ts.replace('Z', '+00:00'))
+        except ValueError:
+            try:
+                return datetime.fromtimestamp(float(raw_ts))
+            except (TypeError, ValueError):
+                return None
+
+    def replay(self):
+        """Проигрывает исторические котировки, обновляя движок и вычисляя арбитраж."""
+
+        if not self.data_path.exists():
+            logger.error("❌ Файл исторических данных не найден: %s", self.data_path)
+            return False
+
+        logger.info(
+            "🚦 Запуск стресс-теста на исторических данных: %s (скорость x%.2f)",
+            self.data_path,
+            self.speed,
+        )
+
+        processed = 0
+        last_timestamp = None
+
+        with self.data_path.open('r', encoding='utf-8') as history_file:
+            reader = csv.DictReader(history_file)
+
+            for row in reader:
+                if self.max_records and processed >= self.max_records:
+                    break
+
+                symbol = row.get('symbol')
+                if not symbol:
+                    continue
+
+                ticker = {
+                    'bid': self.engine._safe_float(row.get('bid')) if hasattr(self.engine, '_safe_float') else float(row.get('bid') or 0),
+                    'ask': self.engine._safe_float(row.get('ask')) if hasattr(self.engine, '_safe_float') else float(row.get('ask') or 0),
+                    'bid_size': float(row.get('bid_size') or row.get('bidSize') or 0),
+                    'ask_size': float(row.get('ask_size') or row.get('askSize') or 0),
+                    'last_price': float(row.get('last_price') or row.get('last') or 0),
+                    'volume': float(row.get('volume') or 0),
+                }
+
+                current_ts = self._parse_timestamp(row.get('timestamp'))
+                if last_timestamp and current_ts:
+                    delay = max((current_ts - last_timestamp).total_seconds() / self.speed, 0)
+                    if delay > 0:
+                        time.sleep(min(delay, 1.0))
+                if current_ts:
+                    last_timestamp = current_ts
+
+                self.engine.update_market_data({symbol: ticker})
+                self.engine.last_tickers = {symbol: ticker}
+                self.engine.detect_triangular_arbitrage({symbol: ticker}, None)
+                processed += 1
+
+        logger.info("✅ Стресс-тест завершён, обработано %s записей", processed)
+        return True
 
 if __name__ == "__main__":
     main()
@@ -6324,11 +6434,20 @@ class RealTradingExecutor:
             self.simulation_mode = self.config.TESTNET
             mode_source = 'TESTNET'
 
+        self.paper_trading_mode = getattr(self.config, 'PAPER_TRADING_MODE', False) or (
+            os.getenv('PAPER_TRADING_MODE', 'false').lower() == 'true'
+        )
+        if self.paper_trading_mode:
+            self.simulation_mode = True
+            mode_source = 'PAPER_TRADING_MODE'
+
         logger.info(
             "🔄 Режим торговли: %s (источник: %s)",
             'симуляция' if self.simulation_mode else 'реальные ордера',
             mode_source
         )
+        if self.paper_trading_mode:
+            logger.info("📄 Paper trading активирован: используется эмуляция стакана и безрисковое исполнение")
         logger.info(
             "📡 Режим котировок Bybit: %s",
             'testnet' if self.config.TESTNET else 'mainnet'
@@ -6488,6 +6607,35 @@ class RealTradingExecutor:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _emulate_orderbook_fill(self, planned_amount: float, side: str, ticker_snapshot: dict, base_price: float | None):
+        """Эмулирует исполнение по лучшему уровню стакана для paper trading."""
+
+        if planned_amount <= 0:
+            return 0.0, base_price or 0.0, 0.0
+
+        side_lower = (side or '').lower()
+        book_price = self._safe_float(
+            ticker_snapshot.get('ask') if side_lower == 'buy' else ticker_snapshot.get('bid')
+        )
+        book_size = self._safe_float(
+            ticker_snapshot.get('ask_size') if side_lower == 'buy' else ticker_snapshot.get('bid_size')
+        )
+
+        effective_price = book_price or base_price or 0.0
+        if book_size <= 0 or effective_price <= 0:
+            return 0.0, effective_price, 0.0
+
+        fill_ratio = min(1.0, book_size / planned_amount if planned_amount else 0)
+        impact = getattr(self.config, 'PAPER_BOOK_IMPACT', 0.05) * (1 - fill_ratio)
+
+        if impact > 0 and effective_price > 0:
+            if side_lower == 'buy':
+                effective_price *= (1 + impact)
+            else:
+                effective_price *= (1 - impact)
+
+        return fill_ratio, effective_price, book_size
     
     def _simulate_trade(self, trade_plan):
         """Симуляция торговли"""
@@ -6530,41 +6678,67 @@ class RealTradingExecutor:
                 if market_price:
                     base_price = market_price
 
-                forced_rejection = random.random() < max(0.0, reject_probability)
-                available_liquidity = self._safe_float(
-                    ticker_snapshot.get('bidSize') if (step.get('side') or '').lower() == 'sell' else ticker_snapshot.get('askSize'),
-                    planned_amount,
-                )
-                if available_liquidity <= 0:
-                    available_liquidity = planned_amount * max(0.0, random.uniform(0.5, 1.2))
-                liquidity_shortage = planned_amount > 0 and available_liquidity < planned_amount * (1 - max(0.0, liquidity_buffer))
+                forced_rejection = False
+                liquidity_shortage = False
+                slippage = 0.0
+                fill_ratio = 1.0
+                execution_price = base_price
+                available_liquidity = planned_amount
 
-                slippage = max(0.0, min(slippage_tolerance, random.uniform(0, slippage_tolerance)))
-
-                if base_price > 0:
-                    if (step.get('side') or '').lower() == 'buy':
-                        execution_price = base_price * (1 + slippage)
-                    else:
-                        execution_price = base_price * (1 - slippage)
+                if self.paper_trading_mode:
+                    fill_ratio, execution_price, available_liquidity = self._emulate_orderbook_fill(
+                        planned_amount,
+                        step.get('side', ''),
+                        ticker_snapshot or {},
+                        base_price,
+                    )
+                    liquidity_shortage = fill_ratio < 1.0
+                    forced_rejection = fill_ratio == 0
+                    if base_price and execution_price:
+                        slippage = abs(execution_price - base_price) / base_price
+                    if liquidity_shortage:
+                        logger.warning(
+                            "⚖️ Paper trading: нехватка ликвидности %.4f против заявки %.4f для %s",
+                            available_liquidity,
+                            planned_amount,
+                            step['symbol'],
+                        )
                 else:
-                    execution_price = base_price
+                    forced_rejection = random.random() < max(0.0, reject_probability)
+                    available_liquidity = self._safe_float(
+                        ticker_snapshot.get('bidSize') if (step.get('side') or '').lower() == 'sell' else ticker_snapshot.get('askSize'),
+                        planned_amount,
+                    )
+                    if available_liquidity <= 0:
+                        available_liquidity = planned_amount * max(0.0, random.uniform(0.5, 1.2))
+                    liquidity_shortage = planned_amount > 0 and available_liquidity < planned_amount * (1 - max(0.0, liquidity_buffer))
 
-                logger.info(
-                    "📉 Применено проскальзывание %.4f%% для %s: базовая цена %.6f -> %.6f",
-                    slippage * 100,
-                    step['symbol'],
-                    base_price,
-                    execution_price if execution_price else base_price
-                )
+                    slippage = max(0.0, min(slippage_tolerance, random.uniform(0, slippage_tolerance)))
 
-                triggered_partial = planned_amount > 0 and random.random() < partial_probability
-                fill_ratio = random.uniform(0.4, 0.95) if triggered_partial else 1.0
+                    if base_price > 0:
+                        if (step.get('side') or '').lower() == 'buy':
+                            execution_price = base_price * (1 + slippage)
+                        else:
+                            execution_price = base_price * (1 - slippage)
+                    else:
+                        execution_price = base_price
 
-                if liquidity_shortage:
-                    fill_ratio = min(fill_ratio, available_liquidity / planned_amount if planned_amount else 0)
+                    logger.info(
+                        "📉 Применено проскальзывание %.4f%% для %s: базовая цена %.6f -> %.6f",
+                        slippage * 100,
+                        step['symbol'],
+                        base_price,
+                        execution_price if execution_price else base_price
+                    )
 
-                if forced_rejection:
-                    fill_ratio = 0.0
+                    triggered_partial = planned_amount > 0 and random.random() < partial_probability
+                    fill_ratio = random.uniform(0.4, 0.95) if triggered_partial else 1.0
+
+                    if liquidity_shortage:
+                        fill_ratio = min(fill_ratio, available_liquidity / planned_amount if planned_amount else 0)
+
+                    if forced_rejection:
+                        fill_ratio = 0.0
 
                 executed_qty = planned_amount * fill_ratio if planned_amount else 0
                 remaining_qty = max(planned_amount - executed_qty, 0)

@@ -23,6 +23,7 @@
 - `standard` — базовый запуск улучшенного бота.
 - `aggressive` — включает тестнет и симуляцию, по умолчанию снижает `MIN_TRIANGULAR_PROFIT` до `0.01` и позволяет переопределять пороги через параметры CLI.
 - `quick` — быстрый тестовый прогон с `OptimizedConfig` и тремя циклами поиска возможностей без выхода в продакшн.
+- `replay` — стресс-тест на исторических данных (CSV) с paper trading и эмуляцией стакана.
 
 Примеры:
 
@@ -35,13 +36,19 @@ python main.py --mode aggressive --min-profit 0.01 --trade-amount 25
 
 # Быстрый тестовый прогон с повышенным логированием
 python main.py --mode quick --log-level DEBUG
+
+# Replay с историческими данными (ускорение в 4 раза)
+python main.py --mode replay --replay-path data/bybit_ticks.csv --replay-speed 4
 ```
 
 Основные параметры:
-- `--mode` — `standard`, `aggressive` или `quick`.
+- `--mode` — `standard`, `aggressive`, `quick` или `replay`.
 - `--min-profit` — порог прибыли `MIN_TRIANGULAR_PROFIT`.
 - `--trade-amount` — сумма сделки для тестовых прогонов.
 - `--log-level` — уровень логирования.
+- `--replay-path` — путь к CSV с полями `timestamp,symbol,bid,ask,bid_size,ask_size,last_price,volume`.
+- `--replay-speed` — ускорение воспроизведения исторических данных.
+- `--replay-limit` — ограничение числа строк для быстрого стресс-теста.
 
 ## Ограничение на топ-20 монет
 
@@ -70,3 +77,11 @@ TESTNET=True
 ```
 
 При запуске `load_dotenv()` автоматически подтянет эти значения, поэтому важно установить зависимости из `requirements.txt`.
+
+Дополнительные параметры:
+
+- `PAPER_TRADING_MODE=true` включает paper trading с эмуляцией стакана.
+- `PAPER_BOOK_IMPACT=0.05` настраивает ценовое влияние при нехватке ликвидности в симуляции.
+- `WEBSOCKET_PRICE_ONLY=true` заставляет использовать только WebSocket-котировки без REST-фолбэка.
+- `REPLAY_DATA_PATH=/path/to/bybit_ticks.csv` задаёт файл для режима `replay`.
+- `REPLAY_SPEED=4` и `REPLAY_MAX_RECORDS=10000` управляют скоростью и объёмом стресс-теста на истории.
