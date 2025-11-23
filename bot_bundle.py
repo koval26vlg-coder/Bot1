@@ -2265,6 +2265,7 @@ class Dashboard:
 import logging
 import threading
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
 
@@ -2535,12 +2536,111 @@ class BybitClient:
         # Всегда заранее сохраняем сегмент рынка, чтобы одинаково использовать его во всех запросах
         self.market_category = getattr(self.config, "MARKET_CATEGORY", "spot")
         self.ws_manager = None
+        self.order_error_metrics = defaultdict(int)
         self._initialize_websocket_streams()
         logger.info(
             f"Bybit client initialized. Testnet: {self.config.TESTNET}, "
             f"Account type: {self.account_type}"
         )
         logger.info(f"🎯 Market category set to: {self.market_category}")
+
+    def _classify_error(self, *, response=None, exception=None):
+        """Определяет тип ошибки для логирования и метрик."""
+
+        if exception is not None:
+            message = str(exception)
+
+            if isinstance(exception, (TimeoutError, )):
+                return "network", message
+
+            if isinstance(exception, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+                return "network", message
+
+            return "unknown", message
+
+        if response is None:
+            return "unknown", "Пустой ответ от API"
+
+        message = response.get('retMsg', '') or ''
+        normalized = message.lower()
+        ret_code = response.get('retCode')
+
+        validation_keywords = (
+            'invalid', 'parameter', 'qty', 'quantity', 'insufficient', 'leverage', 'precision', 'required'
+        )
+        refusal_keywords = (
+            'reject', 'rejected', 'blocked', 'limit', 'risk', 'system busy', 'maintenance', 'forbidden', 'denied'
+        )
+
+        if ret_code and str(ret_code).startswith('100'):
+            return "validation", message or f"Код ошибки {ret_code}"
+
+        if any(keyword in normalized for keyword in validation_keywords):
+            return "validation", message or "Ошибка валидации параметров"
+
+        if any(keyword in normalized for keyword in refusal_keywords):
+            return "exchange_refusal", message or "Биржа отвергла запрос"
+
+        return "unknown", message or f"Код ошибки {ret_code}"
+
+    def _record_error_metric(self, error_type):
+        """Увеличивает счётчик ошибок указанного типа."""
+
+        self.order_error_metrics[error_type] += 1
+
+    def _log_attempt_result(self, operation, attempt, max_attempts, success, error_type, message):
+        """Единообразное логирование попыток с типами ошибок."""
+
+        status_label = "успех" if success else "ошибка"
+        logger_method = logger.info if success else logger.warning
+        logger_method(
+            "%s: попытка %s/%s завершилась как %s (%s). %s",
+            operation,
+            attempt,
+            max_attempts,
+            status_label,
+            error_type,
+            message,
+        )
+
+    def _is_status_uncertain(self, status: str | None) -> bool:
+        """Определяет, требуется ли доуточнение статуса ордера."""
+
+        if not status:
+            return True
+
+        uncertain_statuses = {
+            'Created', 'New', 'Untriggered', 'PartiallyFilled', 'Pending', 'Triggered'
+        }
+        return status in uncertain_statuses
+
+    def _ensure_order_finalized(self, order_id, symbol, initial_status, fallback_payload=None):
+        """Дополнительный опрос/отмена ордера при неоднозначном статусе."""
+
+        if not order_id:
+            logger.warning("Не удалось уточнить статус: отсутствует orderId для %s", symbol)
+            return fallback_payload
+
+        logger.warning(
+            "Статус ордера %s для %s неоднозначен (%s). Запускаем уточнение/отмену.",
+            order_id,
+            symbol,
+            initial_status or 'unknown',
+        )
+
+        for attempt in range(1, 3):
+            fetched = self.get_order_status(order_id, symbol)
+            if fetched and not self._is_status_uncertain(fetched.get('orderStatus')):
+                return fetched
+
+            cancel_result = self.cancel_order(order_id, symbol)
+            if cancel_result:
+                fetched_after_cancel = self.get_order_status(order_id, symbol)
+                if fetched_after_cancel:
+                    return fetched_after_cancel
+            time.sleep(0.5 * attempt)
+
+        return fallback_payload
 
     def _initialize_websocket_streams(self):
         """Настраивает WebSocket для котировок и приватных событий."""
@@ -2848,7 +2948,7 @@ class BybitClient:
                 if qty < 0.001 and symbol in ['BTCUSDT', 'ETHUSDT']:
                     logger.warning(f"🧪 Testnet: Increasing quantity for {symbol} from {qty} to 0.001")
                     qty = 0.001
-            
+
             params = {
                 'category': self.market_category,
                 'symbol': symbol,
@@ -2868,9 +2968,9 @@ class BybitClient:
                 params['triggerPrice'] = str(trigger_price)
                 params['triggerBy'] = trigger_by
                 params['orderFilter'] = 'tpslOrder' if order_type.lower() != 'market' else 'Order'
-            
+
             logger.info(f"🚀 Placing {order_type} order: {params}")
-            
+
             # В тестнете не выполняем реальные ордера, только имитируем
             if self.config.TESTNET:
                 logger.info(f"🧪 TESTNET MODE: Simulating order execution (no real order placed)")
@@ -2883,45 +2983,146 @@ class BybitClient:
                     'cumExecQty': str(qty),
                     'symbol': symbol
                 }
-            
-            # Реальное исполнение (только для основной сети)
-            response = self.session.place_order(**params)
-            
-            if response.get('retCode') == 0:
-                result = response['result']
-                order_id = result.get('orderId')
-                logger.info(f"✅ Order placed successfully! Order ID: {order_id}, Symbol: {symbol}, Side: {side}, Qty: {qty}")
-                logger.info(f"   Status: {result.get('orderStatus')}, Price: {result.get('price')}, Avg Price: {result.get('avgPrice')}")
-                return result
-            else:
-                error_msg = response.get('retMsg', 'Unknown error')
-                logger.error(f"❌ Order failed: {error_msg} (Code: {response.get('retCode')})")
-                logger.error(f"   Request: {params}")
-                return None
-                
+
+            max_attempts = 3
+            base_delay = 0.5
+            last_result = None
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = self.session.place_order(**params)
+                except Exception as exc:
+                    error_type, error_message = self._classify_error(exception=exc)
+                    self._record_error_metric(error_type)
+                    self._log_attempt_result(
+                        "place_order",
+                        attempt,
+                        max_attempts,
+                        False,
+                        error_type,
+                        f"Исключение при размещении: {error_message}",
+                    )
+
+                    if attempt < max_attempts:
+                        time.sleep(base_delay * (2 ** (attempt - 1)))
+                    continue
+
+                if response and response.get('retCode') == 0 and response.get('result'):
+                    result = response['result']
+                    order_id = result.get('orderId')
+                    status = result.get('orderStatus')
+
+                    self._log_attempt_result(
+                        "place_order",
+                        attempt,
+                        max_attempts,
+                        True,
+                        "ok",
+                        f"Статус {status}, orderId={order_id}",
+                    )
+
+                    if self._is_status_uncertain(status):
+                        return self._ensure_order_finalized(order_id, symbol, status, fallback_payload=result)
+
+                    return result
+
+                error_type, error_message = self._classify_error(response=response)
+                self._record_error_metric(error_type)
+                self._log_attempt_result(
+                    "place_order",
+                    attempt,
+                    max_attempts,
+                    False,
+                    error_type,
+                    error_message or f"Код {response.get('retCode') if response else 'N/A'}",
+                )
+
+                last_result = response
+
+                if attempt < max_attempts:
+                    time.sleep(base_delay * (2 ** (attempt - 1)))
+
+            if last_result and last_result.get('result', {}).get('orderId'):
+                uncertain = last_result['result']
+                return self._ensure_order_finalized(
+                    uncertain.get('orderId'),
+                    symbol,
+                    uncertain.get('orderStatus'),
+                    fallback_payload=uncertain,
+                )
+
+            return None
+
         except Exception as e:
             logger.error(f"🔥 Critical error placing order: {str(e)}", exc_info=True)
+            self._record_error_metric("unknown")
             return None
     
     def get_order_status(self, order_id, symbol):
         """Получение статуса ордера"""
         try:
-            response = self.session.get_order_history(
-                category=self.market_category,
-                orderId=order_id,
-                symbol=symbol
-            )
-            
-            if response.get('retCode') == 0 and response.get('result'):
-                order_list = response['result'].get('list', [])
-                if order_list:
-                    order = order_list[0]
-                    logger.debug(f"Order status: {order.get('orderStatus')}, Filled: {order.get('cumExecQty')}/{order.get('qty')}")
-                    return order
+            max_attempts = 3
+            base_delay = 0.5
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = self.session.get_order_history(
+                        category=self.market_category,
+                        orderId=order_id,
+                        symbol=symbol
+                    )
+                except Exception as exc:
+                    error_type, error_message = self._classify_error(exception=exc)
+                    self._record_error_metric(error_type)
+                    self._log_attempt_result(
+                        "get_order_status",
+                        attempt,
+                        max_attempts,
+                        False,
+                        error_type,
+                        f"Исключение при запросе статуса: {error_message}",
+                    )
+
+                    if attempt < max_attempts:
+                        time.sleep(base_delay * (2 ** (attempt - 1)))
+                    continue
+
+                if response.get('retCode') == 0 and response.get('result'):
+                    order_list = response['result'].get('list', [])
+                    if order_list:
+                        order = order_list[0]
+                        logger.debug(
+                            f"Order status: {order.get('orderStatus')}, Filled: {order.get('cumExecQty')}/{order.get('qty')}"
+                        )
+                        self._log_attempt_result(
+                            "get_order_status",
+                            attempt,
+                            max_attempts,
+                            True,
+                            "ok",
+                            f"Получен статус {order.get('orderStatus')}",
+                        )
+                        return order
+
+                error_type, error_message = self._classify_error(response=response)
+                self._record_error_metric(error_type)
+                self._log_attempt_result(
+                    "get_order_status",
+                    attempt,
+                    max_attempts,
+                    False,
+                    error_type,
+                    error_message or f"Статус не найден для {order_id}",
+                )
+
+                if attempt < max_attempts:
+                    time.sleep(base_delay * (2 ** (attempt - 1)))
+
             logger.warning(f"No order found for ID {order_id}")
             return None
         except Exception as e:
             logger.error(f"Error getting order status: {str(e)}")
+            self._record_error_metric("unknown")
             return None
     
     def cancel_order(self, order_id, symbol):
