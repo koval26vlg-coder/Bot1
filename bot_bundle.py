@@ -3617,13 +3617,21 @@ class AdvancedArbitrageEngine:
                     self.price_history[symbol]['spreads'].append(spread_percent)
                     self.price_history[symbol]['raw_spreads'].append(ask - bid)
 
-                # Обновление волатильности
+                # Обновление волатильности только при валидных срединных ценах
                 mid_price = (bid + ask) / 2
                 if len(self.price_history[symbol]['bids']) > 1:
                     prev_mid = (self.price_history[symbol]['bids'][-2] +
                                self.price_history[symbol]['asks'][-2]) / 2
-                    price_change = ((mid_price - prev_mid) / prev_mid) * 100
-                    self.volatility_data[symbol]['short_term'].append(abs(price_change))
+                    if prev_mid > 0 and mid_price > 0:
+                        price_change = ((mid_price - prev_mid) / prev_mid) * 100
+                        self.volatility_data[symbol]['short_term'].append(abs(price_change))
+                    else:
+                        logger.debug(
+                            "Пропуск обновления волатильности для %s из-за некорректного mid: prev=%s current=%s",
+                            symbol,
+                            prev_mid,
+                            mid_price,
+                        )
 
                 # Агрегируем OHLCV для индикаторов
                 ohlcv = self.ohlcv_history[symbol]
