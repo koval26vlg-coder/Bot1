@@ -5476,6 +5476,85 @@ class RealTradingExecutor:
         logger.info(f"💰 SIMULATED PROFIT: {total_profit:.4f} USDT")
         
         return trade_record
+
+    def _get_live_price(self, symbol: str, side: str) -> tuple[float | None, dict]:
+        """Возвращает актуальную цену из WebSocket/REST и источник данных."""
+
+        market_price = None
+        ticker_snapshot = {}
+
+        if self.client.ws_manager:
+            cached, missing = self.client.ws_manager.get_cached_tickers([symbol])
+            ticker_snapshot = cached.get(symbol) or {}
+            if not missing and ticker_snapshot:
+                market_price = ticker_snapshot.get('ask') if side.lower() == 'buy' else ticker_snapshot.get('bid')
+
+        if market_price is None:
+            fresh = self.client.get_tickers([symbol]) or {}
+            ticker_snapshot = fresh.get(symbol) or ticker_snapshot
+            if ticker_snapshot:
+                market_price = ticker_snapshot.get('ask') if side.lower() == 'buy' else ticker_snapshot.get('bid')
+
+        if market_price:
+            market_price = float(market_price)
+        else:
+            logger.warning("⚠️ Не удалось получить актуальную цену для %s", symbol)
+
+        return market_price, ticker_snapshot
+
+    def _ensure_price_alignment(self, planned_price: float | None, market_price: float | None, tolerance: float) -> bool:
+        """Проверяет, что расчётная цена не отклоняется от рыночной выше допуска."""
+
+        if not market_price or not planned_price:
+            return True
+
+        deviation = abs(planned_price - market_price) / planned_price if planned_price else 0
+        if deviation > tolerance:
+            logger.warning(
+                "❌ Отклонение цены %.4f%% превышает допуск %.4f%%", deviation * 100, tolerance * 100
+            )
+            return False
+
+        return True
+
+    def _calculate_limit_price(self, side: str, market_price: float, tolerance: float) -> float:
+        """Формирует лимитную цену с учётом направления и допуска проскальзывания."""
+
+        if side.lower() == 'buy':
+            return market_price * (1 + tolerance)
+        return market_price * (1 - tolerance)
+
+    def _handle_partial_fill(self, step: dict, order_result: dict, tolerance: float, market_price: float | None) -> float:
+        """Обрабатывает частичное исполнение и возвращает коэффициент масштабирования для следующих шагов."""
+
+        requested_qty = float(step.get('amount', 0) or 0)
+        executed_qty = self._safe_float(order_result.get('cumExecQty'))
+        avg_price = self._safe_float(order_result.get('avgPrice')) or step.get('price')
+
+        if requested_qty <= 0 or executed_qty is None or executed_qty <= 0:
+            return 1.0
+
+        fill_ratio = min(1.0, executed_qty / requested_qty)
+
+        if market_price and avg_price:
+            deviation = abs(avg_price - market_price) / market_price
+            if deviation > tolerance:
+                logger.error(
+                    "🔥 Фактическая цена исполнения отклоняется на %.4f%% (допуск %.4f%%)",
+                    deviation * 100,
+                    tolerance * 100,
+                )
+                return -1.0
+
+        if fill_ratio < 1.0:
+            logger.warning(
+                "⚠️ Частичное исполнение: исполнено %.4f из %.4f (%.2f%%)",
+                executed_qty,
+                requested_qty,
+                fill_ratio * 100,
+            )
+
+        return fill_ratio
     
     def _execute_real_trade(self, trade_plan):
         """Реальное исполнение торговли"""
@@ -5488,23 +5567,63 @@ class RealTradingExecutor:
         try:
             results = []
             total_profit = 0
-            
+            slippage_tolerance = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+            amount_scale = 1.0
+
             # Выполняем ордера последовательно
             for step_name, step in trade_plan.items():
                 if step_name.startswith('step') or step_name in ['leg1', 'leg2']:
+                    # Пересчитываем объём с учётом предыдущих частичных исполнений
+                    planned_amount = float(step.get('amount', 0) or 0) * amount_scale
+                    trade_plan[step_name]['amount'] = planned_amount
+
+                    market_price, _ = self._get_live_price(step['symbol'], step['side'])
+
+                    if not self._ensure_price_alignment(step.get('price'), market_price, slippage_tolerance):
+                        logger.error("🚫 Цепочка отменена из-за отклонения котировок на шаге %s", step_name)
+                        self._cancel_previous_orders(results)
+                        return None
+
+                    if step.get('type', 'Limit').lower() == 'limit' and market_price:
+                        new_limit = self._calculate_limit_price(step['side'], market_price, slippage_tolerance)
+                        trade_plan[step_name]['price'] = new_limit
+                        logger.info(
+                            "🔧 Обновлена лимитная цена для %s: %.6f (рынок %.6f)",
+                            step_name,
+                            new_limit,
+                            market_price,
+                        )
+
                     order_result = self.client.place_order(
                         symbol=step['symbol'],
                         side=step['side'],
-                        qty=step['amount'],
-                        price=step.get('price'),
+                        qty=planned_amount,
+                        price=trade_plan[step_name].get('price'),
                         order_type=step.get('type', 'Limit')
                     )
-                    
+
                     if order_result:
                         results.append(order_result)
-                        logger.info(f"✅ REAL ORDER: {step['side']} {step['amount']:.6f} {step['symbol']} @ {step.get('price', '_MARKET_')}")
+                        logger.info(
+                            f"✅ REAL ORDER: {step['side']} {planned_amount:.6f} {step['symbol']} @ {trade_plan[step_name].get('price', '_MARKET_')}"
+                        )
+
+                        fill_ratio = self._handle_partial_fill(
+                            trade_plan[step_name],
+                            order_result,
+                            slippage_tolerance,
+                            market_price,
+                        )
+
+                        if fill_ratio < 0:
+                            self._cancel_previous_orders(results)
+                            return None
+
+                        if 0 < fill_ratio < 1:
+                            amount_scale *= fill_ratio
+
                     else:
-                        logger.error(f"❌ FAILED ORDER: {step['side']} {step['amount']:.6f} {step['symbol']}")
+                        logger.error(f"❌ FAILED ORDER: {step['side']} {planned_amount:.6f} {step['symbol']}")
                         # Отменяем предыдущие ордера при ошибке
                         self._cancel_previous_orders(results)
                         return None
