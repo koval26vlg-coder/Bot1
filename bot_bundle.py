@@ -2660,8 +2660,8 @@ class BybitWebSocketManager:
             return default
 
 class BybitClient:
-    def __init__(self):
-        self.config = Config()
+    def __init__(self, config: Config | None = None):
+        self.config = config or Config()
         self.session = self._create_session()
         self.account_type = "UNIFIED" if not self.config.TESTNET else "CONTRACT"
         # Всегда заранее сохраняем сегмент рынка, чтобы одинаково использовать его во всех запросах
@@ -2670,10 +2670,11 @@ class BybitClient:
         self.order_error_metrics = defaultdict(int)
         self._initialize_websocket_streams()
         logger.info(
-            f"Bybit client initialized. Testnet: {self.config.TESTNET}, "
-            f"Account type: {self.account_type}"
+            "Bybit client initialized. Testnet: %s, Account type: %s, Market category: %s",
+            self.config.TESTNET,
+            self.account_type,
+            self.market_category,
         )
-        logger.info(f"🎯 Market category set to: {self.market_category}")
 
     def _classify_error(self, *, response=None, exception=None):
         """Определяет тип ошибки для логирования и метрик."""
@@ -3423,13 +3424,14 @@ class AdvancedArbitrageEngine:
         self._log_module_origin()
         self._ensure_integrity()
 
-        self.client = BybitClient()
+        base_config = config or Config()
+
+        self.client = BybitClient(config=base_config)
         self.monitor = AdvancedMonitor(self)
         self.real_trader = RealTradingExecutor()
         self.strategy_manager = None
         self.performance_optimizer = None
 
-        base_config = config or Config()
         self._apply_config(base_config, reset_state=True, recreate_client=False)
 
         self.monitor.start_monitoring_loop()
@@ -3445,7 +3447,7 @@ class AdvancedArbitrageEngine:
         self.config = new_config
 
         if recreate_client:
-            self.client = BybitClient()
+            self.client = BybitClient(config=new_config)
 
         self.cooldown_period = getattr(self.config, 'COOLDOWN_PERIOD', None) or 180
 
