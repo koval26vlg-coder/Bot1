@@ -2703,6 +2703,55 @@ class BybitClient:
         start_time = time.time()
         request_count = 0
 
+        max_retries = getattr(self.config, 'TICKER_MAX_RETRIES', 3)
+        base_backoff = getattr(self.config, 'TICKER_BACKOFF_BASE', 0.25)
+        heavy_backoff = getattr(self.config, 'TICKER_HEAVY_BACKOFF_BASE', 1.0)
+        pause_required = False
+
+        def _calculate_delay(attempt, is_heavy):
+            """Подбирает задержку с экспоненциальным ростом"""
+            base = heavy_backoff if is_heavy else base_backoff
+            return base * (2 ** (attempt - 1))
+
+        def _request_with_retries(request_fn, label):
+            """Оборачивает запрос в цикл повторов с экспоненциальным бэкоффом"""
+            nonlocal pause_required
+            last_exc = None
+
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return request_fn()
+                except Exception as exc:
+                    status_code = None
+                    if hasattr(exc, 'response') and getattr(exc, 'response') is not None:
+                        status_code = getattr(exc.response, 'status_code', None)
+
+                    is_rate_limited = status_code == 429
+                    is_server_error = isinstance(status_code, int) and status_code >= 500
+                    is_heavy = is_rate_limited or is_server_error
+                    delay = _calculate_delay(attempt, is_heavy)
+
+                    logger.warning(
+                        "♻️ Ошибка запроса %s (попытка %s/%s, код: %s). Ждём %.2f c перед повтором",
+                        label,
+                        attempt,
+                        max_retries,
+                        status_code or 'n/a',
+                        delay,
+                    )
+                    time.sleep(delay)
+                    last_exc = exc
+
+                    if attempt == max_retries and is_heavy:
+                        pause_required = True
+
+            if pause_required:
+                raise RuntimeError(
+                    "Достигнут предел повторов для запросов тикеров, требуется временная пауза",
+                ) from last_exc
+
+            raise last_exc or RuntimeError("Неизвестная ошибка при запросе тикеров")
+
         def _extract_from_response(response, label):
             """Извлекает данные тикеров из ответа и обновляет остаток"""
             nonlocal tickers
@@ -2739,7 +2788,10 @@ class BybitClient:
                 if cursor:
                     params['cursor'] = cursor
 
-                response = self.session.get_tickers(**params)
+                response = _request_with_retries(
+                    lambda: self.session.get_tickers(**params),
+                    'bulk',
+                )
                 request_count += 1
                 _extract_from_response(response, 'bulk')
 
@@ -2747,6 +2799,8 @@ class BybitClient:
                 if not cursor or not remaining_symbols:
                     break
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.debug(f"🔥 Bulk request failed: {str(e)}")
 
@@ -2758,10 +2812,16 @@ class BybitClient:
 
             def _fetch_symbol(symbol):
                 try:
-                    return self.session.get_tickers(category=self.market_category, symbol=symbol)
+                    return _request_with_retries(
+                        lambda: self.session.get_tickers(
+                            category=self.market_category,
+                            symbol=symbol,
+                        ),
+                        f'fallback:{symbol}',
+                    )
                 except Exception as exc:
                     logger.debug(f"🔥 Exception for {symbol}: {str(exc)}")
-                    return None
+                    raise
 
             with ThreadPoolExecutor(max_workers=min(8, len(remaining_symbols))) as executor:
                 future_to_symbol = {
@@ -2771,7 +2831,16 @@ class BybitClient:
                 for future in as_completed(future_to_symbol):
                     request_count += 1
                     symbol = future_to_symbol[future]
-                    response = future.result()
+                    try:
+                        response = future.result()
+                    except Exception as exc:
+                        logger.debug(f"🔥 Exception for {symbol}: {str(exc)}")
+                        if pause_required:
+                            raise RuntimeError(
+                                "Достигнут предел повторов для фолбэк-запросов, требуется пауза",
+                            ) from exc
+                        continue
+
                     _extract_from_response(response, f'fallback:{symbol}')
 
         if remaining_symbols:
