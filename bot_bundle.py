@@ -3845,10 +3845,35 @@ class AdvancedArbitrageEngine:
                 
                 prices = {
                     leg1: tickers[leg1],
-                    leg2: tickers[leg2], 
+                    leg2: tickers[leg2],
                     leg3: tickers[leg3]
                 }
-                
+
+                depth_levels = getattr(self.config, 'ORDERBOOK_DEPTH_LEVELS', 5)
+
+                for leg in triangle['legs']:
+                    order_book = self.client.get_order_book(leg, depth_levels) or {}
+                    leg_prices = prices[leg]
+                    leg_prices['order_book'] = order_book
+
+                    def _extract_top_size(levels):
+                        """Извлекает объем верхнего уровня стакана."""
+
+                        if not levels:
+                            return 0.0
+
+                        top_level = levels[0]
+                        if isinstance(top_level, dict):
+                            return self._safe_float(top_level.get('size'))
+                        if isinstance(top_level, (list, tuple)) and len(top_level) >= 2:
+                            return self._safe_float(top_level[1])
+                        return 0.0
+
+                    if 'bids' in order_book:
+                        leg_prices['bid_size'] = _extract_top_size(order_book.get('bids'))
+                    if 'asks' in order_book:
+                        leg_prices['ask_size'] = _extract_top_size(order_book.get('asks'))
+
                 # Расчет прибыли для всех направлений
                 directions = [
                     self._calculate_direction(prices, triangle, 1),
@@ -4195,6 +4220,8 @@ class AdvancedArbitrageEngine:
             initial_amount = float(trade_amount or getattr(self.config, 'TRADE_AMOUNT', 0) or 1000.0)
             current_amount = initial_amount
             current_asset = base_currency
+            depth_levels = getattr(self.config, 'ORDERBOOK_DEPTH_LEVELS', 5)
+            liquidity_threshold = float(getattr(self.config, 'TRADE_AMOUNT', initial_amount) or initial_amount)
 
             def _normalize_levels(levels):
                 """Нормализация уровней стакана в формат со стандартными ключами"""
@@ -4213,7 +4240,7 @@ class AdvancedArbitrageEngine:
                         normalized.append({'price': price, 'size': size})
                 return normalized
 
-            def _estimate_execution(side, price_data, amount, price_type):
+            def _estimate_execution(side, price_data, amount, price_type, symbol):
                 """Оценка средней цены исполнения с проверкой объёмов и проскальзывания"""
                 best_price = price_data['ask'] if price_type == 'ask' else price_data['bid']
                 if best_price <= 0:
@@ -4224,7 +4251,38 @@ class AdvancedArbitrageEngine:
                 )
 
                 depth_key = 'asks' if price_type == 'ask' else 'bids'
-                depth = _normalize_levels(price_data.get(depth_key) or price_data.get('order_book', {}).get(depth_key))
+                raw_depth = price_data.get('order_book', {}).get(depth_key) or price_data.get(depth_key)
+                depth = _normalize_levels(raw_depth)[:depth_levels]
+
+                if best_price > 0 and best_volume > 0:
+                    if not depth or depth[0]['price'] != best_price:
+                        depth.insert(0, {'price': best_price, 'size': best_volume})
+                    else:
+                        depth[0]['size'] = max(depth[0]['size'], best_volume)
+
+                if side == 'Buy':
+                    available_quote = sum(level['price'] * level['size'] for level in depth)
+                    required_quote = max(amount, liquidity_threshold)
+                    if available_quote < required_quote:
+                        logger.debug(
+                            "Путь отклонен: недостаточный объем в стакане %s для покупки, доступно %.2f, требуется %.2f",
+                            symbol,
+                            available_quote,
+                            required_quote
+                        )
+                        return None, None
+
+                else:
+                    available_base = sum(level['size'] for level in depth)
+                    required_base = max(amount, liquidity_threshold / best_price if best_price > 0 else amount)
+                    if available_base < required_base:
+                        logger.debug(
+                            "Путь отклонен: недостаточный объем в стакане %s для продажи, доступно %.6f, требуется %.6f",
+                            symbol,
+                            available_base,
+                            required_base
+                        )
+                        return None, None
 
                 if side == 'Buy':
                     remaining_quote = amount
@@ -4301,7 +4359,7 @@ class AdvancedArbitrageEngine:
                         )
                         return -100
 
-                    price, acquired = _estimate_execution('Buy', price_data, current_amount, step['price_type'])
+                    price, acquired = _estimate_execution('Buy', price_data, current_amount, step['price_type'], symbol)
                     if not price or not acquired:
                         return -100
 
@@ -4316,7 +4374,7 @@ class AdvancedArbitrageEngine:
                         )
                         return -100
 
-                    price, executed_amount = _estimate_execution('Sell', price_data, current_amount, step['price_type'])
+                    price, executed_amount = _estimate_execution('Sell', price_data, current_amount, step['price_type'], symbol)
                     if not price or not executed_amount:
                         return -100
 
