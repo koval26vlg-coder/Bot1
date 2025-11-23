@@ -2498,6 +2498,14 @@ class BybitWebSocketManager:
             logger.warning("pybit не установлен, WebSocket котировок недоступен")
             return
 
+        symbols = list(self._symbols)
+        if not symbols:
+            logger.info("Нет символов для подписки на публичный стрим котировок")
+            return
+
+        batch_size = 10
+        symbol_batches = [symbols[i : i + batch_size] for i in range(0, len(symbols), batch_size)]
+
         try:
             self._public_ws = WebSocket(
                 channel_type=self.config.MARKET_CATEGORY,
@@ -2505,9 +2513,18 @@ class BybitWebSocketManager:
                 api_key=self.config.API_KEY,
                 api_secret=self.config.API_SECRET,
             )
-            self._public_ws.ticker_stream(symbol=list(self._symbols), callback=self._handle_ticker)
-            self._last_ticker_ts = time.time()
-            logger.info("📡 WebSocket котировок запущен для %s символов", len(self._symbols))
+            logger.info(
+                "Подготовлено %s пакетов подписки на котировки для %s символов",
+                len(symbol_batches),
+                len(symbols),
+            )
+
+            for idx, batch in enumerate(symbol_batches, start=1):
+                logger.debug("Подписка на пакет %s/%s: %s", idx, len(symbol_batches), batch)
+                self._public_ws.ticker_stream(symbol=batch, callback=self._handle_ticker)
+                self._last_ticker_ts = time.time()
+
+            logger.info("📡 WebSocket котировок запущен для %s символов", len(symbols))
         except Exception as exc:
             logger.warning("Не удалось подключиться к публичному стриму котировок: %s", exc)
             self._public_ws = None
