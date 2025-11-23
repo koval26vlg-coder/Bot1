@@ -1891,7 +1891,7 @@ class AdvancedMonitor:
 
 # ==== Начало visualization.py ====
 import dash
-from dash import dcc, html, Input, Output, State, callback
+from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objs as go
 from datetime import datetime
