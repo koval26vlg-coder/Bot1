@@ -77,6 +77,12 @@ class Config:
         self._available_cross_map_cache = None
         self._symbol_watchlist_cache = None
         self._symbol_details_map = {}
+        self._market_category_override = os.getenv('MARKET_CATEGORY_OVERRIDE')
+        self._auto_detect_market_category = os.getenv('AUTO_DETECT_MARKET_CATEGORY', 'true').lower() == 'true'
+        self._enable_spot_in_testnet = os.getenv('TESTNET_SPOT_ENABLED', 'false').lower() == 'true'
+        self._arbitrage_market_hint = os.getenv('ARBITRAGE_TICKER_CATEGORY', 'spot').lower()
+        self._testnet_spot_api_base = os.getenv('TESTNET_SPOT_API_BASE_URL', 'https://api-testnet.bybit.com')
+        self._detected_market_category = None
         self._min_triangular_profit_override = self._load_min_triangular_profit_override()
         # Настройки динамического ослабления порогов
         self._empty_cycle_relax_step = self._load_float_env(
@@ -125,13 +131,72 @@ class Config:
 
     @property
     def MARKET_CATEGORY(self):
-        """Возвращает тип сегмента рынка в зависимости от режима"""
-        return 'linear' if self.TESTNET else 'spot'
+        """Возвращает тип сегмента рынка с учётом среды и арбитражных тикеров."""
+
+        if self._market_category_override:
+            return self._market_category_override
+
+        prefers_spot = self._arbitrage_market_hint == 'spot' or self._enable_spot_in_testnet
+
+        if self.TESTNET:
+            if self._auto_detect_market_category:
+                detected = self._detect_testnet_market_category(prefers_spot)
+                if detected:
+                    return detected
+
+            if prefers_spot:
+                return 'spot'
+
+            return 'linear'
+
+        return 'spot'
 
     @property
     def API_BASE_URL(self):
-        """Базовый URL публичного API Bybit"""
-        return 'https://api-testnet.bybit.com' if self.TESTNET else 'https://api.bybit.com'
+        """Базовый URL публичного API Bybit с учётом выбранного сегмента рынка."""
+
+        if self.TESTNET:
+            if self.MARKET_CATEGORY == 'spot':
+                return self._testnet_spot_api_base
+            return 'https://api-testnet.bybit.com'
+
+        return 'https://api.bybit.com'
+
+    def _detect_testnet_market_category(self, prefers_spot: bool) -> str | None:
+        """Пытается автоматически подобрать категорию для тестовой среды."""
+
+        if self._detected_market_category:
+            return self._detected_market_category
+
+        order = ['spot', 'linear'] if prefers_spot else ['linear', 'spot']
+        base_url = 'https://api-testnet.bybit.com'
+
+        for candidate in order:
+            try:
+                response = requests.get(
+                    f"{base_url}/v5/market/instruments-info",
+                    params={'category': candidate},
+                    timeout=5,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get('retCode') == 0 and payload.get('result', {}).get('list'):
+                    self._detected_market_category = candidate
+                    logger.info(
+                        "Автоматически выбран сегмент %s для тестовой среды", candidate
+                    )
+                    return self._detected_market_category
+            except requests.RequestException as exc:
+                logger.debug(
+                    "Автодетект категории %s не удался: %s", candidate, exc
+                )
+
+        logger.warning(
+            "Не удалось определить доступную категорию тестнета, используем запасной порядок"
+        )
+        fallback = 'linear' if 'linear' in order else order[0]
+        self._detected_market_category = fallback
+        return self._detected_market_category
 
     @property
     def AVAILABLE_CROSSES(self):
@@ -2508,7 +2573,7 @@ class BybitWebSocketManager:
 
         try:
             self._public_ws = WebSocket(
-                channel_type=self.config.MARKET_CATEGORY,
+                channel_type=self.market_category,
                 testnet=self.config.TESTNET,
                 api_key=self.config.API_KEY,
                 api_secret=self.config.API_SECRET,
