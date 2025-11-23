@@ -2774,6 +2774,29 @@ class BybitClient:
                     response = future.result()
                     _extract_from_response(response, f'fallback:{symbol}')
 
+        if remaining_symbols:
+            required_symbols = set(self.config.SYMBOLS)
+            for triangle in self.config.TRIANGULAR_PAIRS:
+                required_symbols.update(triangle.get('legs', []))
+
+            missing_required = remaining_symbols & required_symbols
+            missing_preview = ', '.join(sorted(remaining_symbols))
+            logger.error(
+                "🚫 После bulk и фолбэк-запросов остались отсутствующие тикеры: %s",
+                missing_preview,
+            )
+
+            if missing_required:
+                pause_seconds = getattr(self.config, 'UPDATE_INTERVAL', 1)
+                logger.error(
+                    "⏸️ Принудительная пауза цикла на %.2f с для предотвращения работы с неконсистентными данными",
+                    pause_seconds,
+                )
+                time.sleep(pause_seconds)
+                raise RuntimeError(
+                    f"Критичные тикеры недоступны: {', '.join(sorted(missing_required))}"
+                )
+
         duration = time.time() - start_time
         logger.debug(
             f"📊 Total tickers received: {len(tickers)} (requests: {request_count}, missing: {len(remaining_symbols)})"
