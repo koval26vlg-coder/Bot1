@@ -2263,16 +2263,269 @@ class Dashboard:
 
 # ==== Начало bybit_client.py ====
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
 
 try:
-    from pybit.unified_trading import HTTP
+    from pybit.unified_trading import HTTP, WebSocket
 except ModuleNotFoundError:
     HTTP = None
+    WebSocket = None
 
 logger = logging.getLogger(__name__)
+
+
+class BybitWebSocketManager:
+    """Управление WebSocket-подключениями к Bybit для котировок и ордеров."""
+
+    def __init__(self, config: Config, *, order_callback=None):
+        self.config = config
+        self._order_callback = order_callback
+        self._ticker_cache = {}
+        self._cache_lock = threading.Lock()
+        self._public_ws = None
+        self._private_ws = None
+        self._symbols = set()
+        self._order_listeners = []
+        self._stop_event = threading.Event()
+        self._monitor_thread = None
+        self._last_ticker_ts = 0
+        self._max_staleness = max(getattr(self.config, '_ticker_staleness_warning', 5.0) * 2, 1.0)
+
+    def start(self, symbols):
+        """Запуск стримов по списку тикеров."""
+
+        self._symbols = set(symbols)
+        self._connect_public_ws()
+        self._ensure_monitor()
+
+    def stop(self):
+        """Остановка всех подключений (используется при завершении работы)."""
+
+        self._stop_event.set()
+        if self._public_ws and hasattr(self._public_ws, 'exit'):
+            self._public_ws.exit()
+        if self._private_ws and hasattr(self._private_ws, 'exit'):
+            self._private_ws.exit()
+
+    def register_order_listener(self, callback):
+        """Регистрирует обработчик событий ордеров и инициирует приватный стрим."""
+
+        if not callback:
+            return
+
+        if callback not in self._order_listeners:
+            self._order_listeners.append(callback)
+
+        self._connect_private_ws()
+        self._ensure_monitor()
+
+    def get_cached_tickers(self, symbols, max_age=None):
+        """Возвращает свежие котировки из кэша и список недостающих тикеров."""
+
+        max_age = max_age or self._max_staleness
+        now = time.time()
+        fresh = {}
+        missing = []
+
+        with self._cache_lock:
+            for symbol in symbols:
+                cached = self._ticker_cache.get(symbol)
+                if cached and now - cached['ts'] <= max_age:
+                    fresh[symbol] = cached['data']
+                else:
+                    missing.append(symbol)
+
+        return fresh, missing
+
+    def update_cache(self, tickers):
+        """Принудительное обновление кэша внешними данными (например, после REST-запроса)."""
+
+        now = time.time()
+        with self._cache_lock:
+            for symbol, data in tickers.items():
+                self._ticker_cache[symbol] = {'data': data, 'ts': now}
+                self._last_ticker_ts = now
+
+    def _ensure_monitor(self):
+        """Запускает фоновый мониторинг состояния подключений."""
+
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            return
+
+        self._monitor_thread = threading.Thread(target=self._monitor_connections, daemon=True)
+        self._monitor_thread.start()
+
+    def _monitor_connections(self):
+        """Следит за обрывами соединений и восстанавливает стримы."""
+
+        while not self._stop_event.is_set():
+            try:
+                now = time.time()
+                if self._symbols and (self._public_ws is None or now - self._last_ticker_ts > self._max_staleness):
+                    logger.debug("Переподключение публичного стрима котировок")
+                    self._restart_public_ws()
+
+                if self._order_listeners and self._private_ws is None:
+                    logger.debug("Переподключение приватного стрима ордеров")
+                    self._connect_private_ws()
+            except Exception as exc:
+                logger.warning("Ошибка мониторинга WebSocket: %s", exc)
+
+            time.sleep(3)
+
+    def _connect_public_ws(self):
+        """Создаёт подключение для получения котировок."""
+
+        if WebSocket is None:
+            logger.warning("pybit не установлен, WebSocket котировок недоступен")
+            return
+
+        try:
+            self._public_ws = WebSocket(
+                channel_type=self.config.MARKET_CATEGORY,
+                testnet=self.config.TESTNET,
+                api_key=self.config.API_KEY,
+                api_secret=self.config.API_SECRET,
+            )
+            self._public_ws.ticker_stream(symbol=list(self._symbols), callback=self._handle_ticker)
+            self._last_ticker_ts = time.time()
+            logger.info("📡 WebSocket котировок запущен для %s символов", len(self._symbols))
+        except Exception as exc:
+            logger.warning("Не удалось подключиться к публичному стриму котировок: %s", exc)
+            self._public_ws = None
+
+    def _restart_public_ws(self):
+        """Перезапускает публичное подключение."""
+
+        try:
+            if self._public_ws and hasattr(self._public_ws, 'exit'):
+                self._public_ws.exit()
+        finally:
+            self._connect_public_ws()
+
+    def _connect_private_ws(self):
+        """Создаёт приватное подключение для событий ордеров."""
+
+        if WebSocket is None:
+            logger.warning("pybit не установлен, приватный WebSocket недоступен")
+            return
+
+        if not self.config.API_KEY or not self.config.API_SECRET:
+            logger.warning("API ключи не заданы, пропускаем подписку на приватные события")
+            return
+
+        try:
+            self._private_ws = WebSocket(
+                channel_type="private",
+                testnet=self.config.TESTNET,
+                api_key=self.config.API_KEY,
+                api_secret=self.config.API_SECRET,
+            )
+            self._private_ws.order_stream(callback=self._handle_order)
+            logger.info("🔔 WebSocket ордеров активирован")
+        except Exception as exc:
+            logger.warning("Не удалось подключиться к приватному стриму ордеров: %s", exc)
+            self._private_ws = None
+
+    def _handle_ticker(self, message):
+        """Нормализация входящих котировок и сохранение в кэше."""
+
+        data = message.get('data') if isinstance(message, dict) else None
+        if not data:
+            return
+
+        if isinstance(data, dict):
+            entries = [data]
+        else:
+            entries = data
+
+        now = time.time()
+
+        with self._cache_lock:
+            for entry in entries:
+                symbol = entry.get('symbol') or entry.get('s')
+                if not symbol:
+                    continue
+
+                bid = self._safe_float(
+                    entry.get('bid1Price')
+                    or entry.get('bestBidPrice')
+                    or entry.get('bp')
+                    or entry.get('b1'),
+                    0,
+                )
+                ask = self._safe_float(
+                    entry.get('ask1Price')
+                    or entry.get('bestAskPrice')
+                    or entry.get('ap')
+                    or entry.get('a1'),
+                    0,
+                )
+
+                ticker = {
+                    'bid': bid,
+                    'ask': ask,
+                    'last_price': self._safe_float(entry.get('lastPrice') or entry.get('lp') or entry.get('price'), 0),
+                    'bid_size': self._safe_float(entry.get('bid1Size') or entry.get('b1Size') or entry.get('bidSize') or entry.get('bq')),  
+                    'ask_size': self._safe_float(entry.get('ask1Size') or entry.get('a1Size') or entry.get('askSize') or entry.get('aq')),
+                }
+
+                self._ticker_cache[symbol] = {'data': ticker, 'ts': now}
+                self._last_ticker_ts = now
+
+        if self._order_callback:
+            # Хук на внешний обработчик может использовать котировки для актуализации внутренних структур
+            try:
+                self._order_callback({'type': 'ticker', 'symbols': [e.get('symbol') for e in entries if e.get('symbol')]})
+            except Exception:
+                logger.debug("Ошибка колбэка на котировки", exc_info=True)
+
+    def _handle_order(self, message):
+        """Пробрасывает события ордеров зарегистрированным слушателям."""
+
+        data = message.get('data') if isinstance(message, dict) else None
+        if not data:
+            return
+
+        events = data if isinstance(data, list) else [data]
+
+        for event in events:
+            normalized = {
+                'orderId': event.get('orderId'),
+                'symbol': event.get('symbol'),
+                'orderStatus': event.get('orderStatus'),
+                'side': event.get('side'),
+                'leavesQty': self._safe_float(event.get('leavesQty')),
+                'cumExecQty': self._safe_float(event.get('cumExecQty')),
+                'avgPrice': self._safe_float(event.get('avgPrice') or event.get('lastPrice')),
+                'execType': event.get('execType') or event.get('eventType'),
+                'updatedTime': event.get('updatedTime') or event.get('ts') or int(time.time() * 1000),
+            }
+
+            for listener in self._order_listeners:
+                try:
+                    listener(normalized)
+                except Exception:
+                    logger.debug("Ошибка в обработчике событий ордеров", exc_info=True)
+
+    def _safe_float(self, value, default=0.0):
+        """Безопасное приведение к float для всех входящих данных."""
+
+        try:
+            if value is None:
+                return default
+
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    return default
+
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
 class BybitClient:
     def __init__(self):
@@ -2281,11 +2534,27 @@ class BybitClient:
         self.account_type = "UNIFIED" if not self.config.TESTNET else "CONTRACT"
         # Всегда заранее сохраняем сегмент рынка, чтобы одинаково использовать его во всех запросах
         self.market_category = getattr(self.config, "MARKET_CATEGORY", "spot")
+        self.ws_manager = None
+        self._initialize_websocket_streams()
         logger.info(
             f"Bybit client initialized. Testnet: {self.config.TESTNET}, "
             f"Account type: {self.account_type}"
         )
         logger.info(f"🎯 Market category set to: {self.market_category}")
+
+    def _initialize_websocket_streams(self):
+        """Настраивает WebSocket для котировок и приватных событий."""
+
+        if WebSocket is None:
+            logger.warning("pybit не установлен, пропускаем запуск WebSocket")
+            return
+
+        try:
+            self.ws_manager = BybitWebSocketManager(self.config)
+            self.ws_manager.start(self.config.SYMBOLS)
+        except Exception as exc:
+            logger.warning("Не удалось инициализировать WebSocket-стримы: %s", exc, exc_info=True)
+            self.ws_manager = None
     
     def _create_session(self):
         """Создание сессии для работы с Bybit API"""
@@ -2313,9 +2582,24 @@ class BybitClient:
         if not requested_symbols:
             return tickers
 
+        cache_hits = {}
+        remaining_symbols = set(requested_symbols)
+
+        if self.ws_manager:
+            cache_hits, fresh_missing = self.ws_manager.get_cached_tickers(
+                requested_symbols,
+                max_age=getattr(self.config, '_ticker_staleness_warning', 5.0),
+            )
+            tickers.update(cache_hits)
+            remaining_symbols = set(fresh_missing)
+
+            if not remaining_symbols:
+                logger.debug("♻️ Используем кэш WebSocket для всех тикеров")
+                self._validate_ticker_freshness(tickers)
+                return tickers
+
         logger.debug(f"🔍 Requesting {len(requested_symbols)} symbols: {requested_symbols}")
 
-        remaining_symbols = set(requested_symbols)
         start_time = time.time()
         request_count = 0
 
@@ -2404,9 +2688,21 @@ class BybitClient:
                 f"⏱️ Сбор {len(tickers)} тикеров занял {duration:.2f} с (запросов: {request_count})"
             )
 
+        if self.ws_manager and tickers:
+            self.ws_manager.update_cache(tickers)
+
         self._validate_ticker_freshness(tickers)
 
         return tickers
+
+    def add_order_listener(self, callback):
+        """Подключает внешний обработчик событий ордеров."""
+
+        if not self.ws_manager:
+            logger.warning("WebSocket менеджер не инициализирован, события ордеров недоступны")
+            return
+
+        self.ws_manager.register_order_listener(callback)
 
     def _validate_ticker_freshness(self, tickers):
         """Проверяет насколько свежие котировки получены от Bybit"""
@@ -4830,6 +5126,7 @@ if __name__ == "__main__":
 # ==== Начало real_trading.py ====
 import logging
 import time
+from collections import deque
 from datetime import datetime
 import os  # Исправлено: добавлен импорт os
 from config import Config  # Исправлено: проверьте правильность пути импорта
@@ -4896,6 +5193,8 @@ class RealTradingExecutor:
         self.risk_manager = RiskManager()
         # Фиктивный баланс для симуляции, чтобы можно было управлять проверками ликвидности
         self._simulated_balance_usdt = self._load_simulated_balance()
+        self.recent_order_events = deque(maxlen=200)
+        self._last_execution_hint = None
 
         # Режим симуляции (True = симуляция, False = реальные ордера)
         simulation_env = os.getenv('TRADE_SIMULATION_MODE')
@@ -4920,6 +5219,9 @@ class RealTradingExecutor:
             "📡 Режим котировок Bybit: %s",
             'testnet' if self.config.TESTNET else 'mainnet'
         )
+
+        # Подписываемся на события ордеров для быстрого реагирования
+        self.client.add_order_listener(self._handle_order_event)
 
         if self.simulation_mode and not self.config.TESTNET:
             logger.warning(
@@ -4981,6 +5283,60 @@ class RealTradingExecutor:
         except (TypeError, ValueError):
             logger.warning("⚠️ Некорректное значение SIMULATION_BALANCE_USDT, используем 100.0 USDT")
             return 100.0
+
+    def _handle_order_event(self, event):
+        """Реагирует на обновления по ордерам (исполнения и частичные исполнения)."""
+
+        normalized = {
+            'orderId': event.get('orderId'),
+            'symbol': event.get('symbol'),
+            'status': (event.get('orderStatus') or '').lower(),
+            'side': event.get('side'),
+            'filled_qty': self._safe_float(event.get('cumExecQty')),
+            'remaining_qty': self._safe_float(event.get('leavesQty')),
+            'avg_price': self._safe_float(event.get('avgPrice')),
+            'execType': event.get('execType'),
+            'updatedTime': event.get('updatedTime'),
+        }
+
+        self.recent_order_events.appendleft(normalized)
+        self._last_execution_hint = normalized
+
+        status = normalized['status']
+        if status in ('partiallyfilled', 'partially_filled', 'partial_fill'):
+            logger.info(
+                "🔔 Частичное исполнение %s: исполнено=%s, осталось=%s",
+                normalized['orderId'],
+                normalized['filled_qty'],
+                normalized['remaining_qty'],
+            )
+        elif status == 'filled':
+            logger.info(
+                "✅ Полное исполнение %s по цене %s",
+                normalized['orderId'],
+                normalized['avg_price'],
+            )
+
+    def get_live_order_events(self):
+        """Возвращает последние события по ордерам для оперативных решений движка."""
+
+        return list(self.recent_order_events)
+
+    def _safe_float(self, value, default=0.0):
+        """Безопасное приведение к float для данных из WebSocket."""
+
+        try:
+            if value is None:
+                return default
+
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    return default
+
+            return float(value)
+        except (TypeError, ValueError):
+            return default
     
     def _simulate_trade(self, trade_plan):
         """Симуляция торговли"""
