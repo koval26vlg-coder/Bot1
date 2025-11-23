@@ -3390,7 +3390,6 @@ from bybit_client import BybitClient
 from config import Config
 from monitoring import AdvancedMonitor
 from performance_optimizer import PerformanceOptimizer
-from real_trading import RealTradingExecutor
 # Импортируем менеджер стратегий напрямую из локального модуля без пакета strategies
 from indicator_strategies import StrategyManager
 # Используем реальный локальный модуль math_stats вместо устаревшего utils.math_stats
