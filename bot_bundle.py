@@ -122,6 +122,7 @@ class Config:
             'SIMULATION_AUTO_COMPLETE_PARTIALS',
             'true',
         ).lower() == 'true'
+        self._market_symbols_limit = self._load_int_env('MARKET_SYMBOLS_LIMIT', 0)
         self.WEBSOCKET_PRICE_ONLY = os.getenv('WEBSOCKET_PRICE_ONLY', 'false').lower() == 'true'
         self.PAPER_TRADING_MODE = os.getenv('PAPER_TRADING_MODE', 'false').lower() == 'true'
         self.PAPER_BOOK_IMPACT = self._load_float_env('PAPER_BOOK_IMPACT', 0.05)
@@ -215,7 +216,7 @@ class Config:
     def SYMBOLS(self):
         """Список наблюдаемых тикеров, согласованный с биржей"""
         if self._symbol_watchlist_cache is None:
-            available_symbols = list(self._fetch_market_symbols())
+            available_symbols = set(self._fetch_market_symbols())
             watchlist = list(available_symbols)
 
             triangle_legs = set()
@@ -223,6 +224,8 @@ class Config:
                 triangle_legs.update(triangle['legs'])
 
             for leg in sorted(triangle_legs):
+                if available_symbols and leg not in available_symbols:
+                    continue
                 if leg not in watchlist:
                     watchlist.append(leg)
 
@@ -235,8 +238,8 @@ class Config:
         if self._triangular_pairs_cache is not None:
             return self._triangular_pairs_cache
 
-        templates = self._build_triangle_templates()
-        available_symbols = self._fetch_market_symbols()
+        available_symbols = set(self._fetch_market_symbols())
+        templates = self._build_triangle_templates(available_symbols)
 
         if available_symbols:
             valid_pairs = []
@@ -255,8 +258,22 @@ class Config:
                 self._triangular_pairs_cache = valid_pairs
                 return self._triangular_pairs_cache
 
+            filtered_templates = [
+                triangle
+                for triangle in templates
+                if all(leg in available_symbols for leg in triangle['legs'])
+            ]
+
+            if filtered_templates:
+                logger.warning(
+                    "Используем отфильтрованный статический шаблон: доступно %s треугольников",
+                    len(filtered_templates),
+                )
+                self._triangular_pairs_cache = filtered_templates
+                return self._triangular_pairs_cache
+
             logger.warning(
-                "API не вернул треугольники с полным покрытием. Используем шаблон как запасной вариант."
+                "API не вернул треугольники с полным покрытием. Используем шаблон как запасной вариант без фильтра."
             )
 
         # Фолбэк (например, оффлайн среда или ошибки сети)
@@ -470,16 +487,25 @@ class Config:
 
         return (start, end)
 
-    def _build_triangle_templates(self):
+    def _build_triangle_templates(self, available_symbols=None):
         """Создает список потенциальных треугольников, согласованный с реальными тикерами"""
-        available_symbols = self._fetch_market_symbols()
         dynamic_templates = self._build_dynamic_triangle_templates(available_symbols)
 
         if dynamic_templates:
             return dynamic_templates
 
         # Фолбэк на статическую конфигурацию, если API недоступно или ничего не построено
-        return self._build_static_triangle_templates()
+        static_templates = self._build_static_triangle_templates(available_symbols)
+        if available_symbols:
+            filtered_static = [
+                triangle
+                for triangle in static_templates
+                if all(leg in available_symbols for leg in triangle['legs'])
+            ]
+            if filtered_static:
+                return filtered_static
+
+        return static_templates
 
     def _build_dynamic_triangle_templates(self, available_symbols):
         """Генерация всех возможных треугольников на основе доступных инструментов"""
@@ -538,7 +564,7 @@ class Config:
 
         return templates
 
-    def _build_static_triangle_templates(self):
+    def _build_static_triangle_templates(self, available_symbols=None):
         """Резервный список треугольников на случай оффлайн режима"""
         templates = [
             {
@@ -571,6 +597,14 @@ class Config:
                 'base_currency': 'USDT',
                 'priority': priority
             })
+
+        if available_symbols:
+            available_set = set(available_symbols)
+            templates = [
+                triangle
+                for triangle in templates
+                if all(leg in available_set for leg in triangle['legs'])
+            ]
 
         return templates
 
@@ -691,17 +725,20 @@ class Config:
                     market_entries.append((symbol, turnover_value))
 
                 market_entries.sort(key=lambda entry: entry[1], reverse=True)
-                top_entries = market_entries[:20]
+                limit = self._market_symbols_limit if self._market_symbols_limit > 0 else None
+                selected_entries = market_entries if limit is None else market_entries[:limit]
 
-                self._available_symbols_cache = [symbol for symbol, _ in top_entries]
+                self._available_symbols_cache = [symbol for symbol, _ in selected_entries]
                 self._symbol_details_map = {
-                    symbol: detailed_symbols.get(symbol) for symbol, _ in top_entries
+                    symbol: detailed_symbols.get(symbol)
+                    for symbol, _ in selected_entries
                     if detailed_symbols.get(symbol)
                 }
                 logger.info(
-                    "Получено %s тикеров для категории %s (отсортировано по обороту)",
+                    "Получено %s тикеров для категории %s (ограничение %s)",
                     len(self._available_symbols_cache),
-                    self.MARKET_CATEGORY
+                    self.MARKET_CATEGORY,
+                    limit if limit is not None else 'без ограничений',
                 )
                 return self._available_symbols_cache
 
