@@ -97,6 +97,14 @@ class Config:
             getattr(self, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
         )
         self._simulation_latency_range = self._load_latency_range()
+        self._simulation_partial_fill_probability = self._load_float_env(
+            'SIMULATION_PARTIAL_FILL_PROB',
+            0.0,
+        )
+        self._simulation_auto_complete_partials = os.getenv(
+            'SIMULATION_AUTO_COMPLETE_PARTIALS',
+            'true',
+        ).lower() == 'true'
 
     @property
     def MARKET_CATEGORY(self):
@@ -263,6 +271,16 @@ class Config:
     def SIMULATION_LATENCY_RANGE(self):
         """Диапазон искусственной задержки в секундах для симуляции"""
         return self._simulation_latency_range
+
+    @property
+    def SIMULATION_PARTIAL_FILL_PROBABILITY(self):
+        """Вероятность частичного исполнения ордера в симуляции (0..1)."""
+        return self._simulation_partial_fill_probability
+
+    @property
+    def SIMULATION_AUTO_COMPLETE_PARTIALS(self):
+        """Флаг, разрешающий автоматически добирать остаток после частичного исполнения."""
+        return self._simulation_auto_complete_partials
 
     def _load_min_triangular_profit_override(self):
         """Читает переопределение порога прибыли из переменной окружения"""
@@ -6465,9 +6483,15 @@ class RealTradingExecutor:
             getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
         )
         latency_range = getattr(self.config, 'SIMULATION_LATENCY_RANGE', (0.05, 0.2))
+        partial_probability = getattr(self.config, 'SIMULATION_PARTIAL_FILL_PROBABILITY', 0.0)
+        auto_complete_partials = getattr(self.config, 'SIMULATION_AUTO_COMPLETE_PARTIALS', True)
+        amount_scale = 1.0
 
         for step_name, step in trade_plan.items():
             if step_name.startswith('step') or step_name in ['leg1', 'leg2']:
+                planned_amount = float(step.get('amount', 0) or 0) * amount_scale
+                trade_plan[step_name]['amount'] = planned_amount
+
                 latency = 0.0
                 if isinstance(latency_range, (list, tuple)) and len(latency_range) == 2:
                     latency = max(0.0, random.uniform(latency_range[0], latency_range[1]))
@@ -6501,15 +6525,22 @@ class RealTradingExecutor:
                     execution_price if execution_price else base_price
                 )
 
+                triggered_partial = planned_amount > 0 and random.random() < partial_probability
+                fill_ratio = random.uniform(0.4, 0.95) if triggered_partial else 1.0
+                executed_qty = planned_amount * fill_ratio if planned_amount else 0
+                remaining_qty = max(planned_amount - executed_qty, 0)
+
                 simulated_result = {
                     'orderId': f"sim_{int(time.time())}_{step_name}",
-                    'orderStatus': 'Filled',
+                    'orderStatus': 'PartiallyFilled' if fill_ratio < 1 else 'Filled',
                     'symbol': step['symbol'],
                     'side': step['side'],
-                    'qty': step['amount'],
+                    'qty': planned_amount,
                     'price': execution_price or step['price'],
                     'avgPrice': execution_price or step['price'],
-                    'cumExecQty': step['amount'],
+                    'cumExecQty': executed_qty,
+                    'leavesQty': remaining_qty,
+                    'isActive': fill_ratio < 1,
                     'simulated': True,
                     'timestamp': datetime.now().isoformat(),
                     'applied_slippage': slippage,
@@ -6519,10 +6550,49 @@ class RealTradingExecutor:
                 logger.info(
                     "✅ SIMULATED: %s %.6f %s @ %.2f",
                     step['side'],
-                    step['amount'],
+                    planned_amount,
                     step['symbol'],
                     execution_price or step['price']
                 )
+
+                fill_ratio_effective = self._handle_partial_fill(
+                    trade_plan[step_name],
+                    simulated_result,
+                    slippage_tolerance,
+                    market_price,
+                )
+                simulated_result['fillRatio'] = fill_ratio_effective
+
+                if fill_ratio < 1 and auto_complete_partials and remaining_qty > 0:
+                    completion_latency = max(
+                        0.0,
+                        random.uniform(latency_range[0], latency_range[1])
+                    ) if isinstance(latency_range, (list, tuple)) and len(latency_range) == 2 else 0.0
+                    if completion_latency:
+                        time.sleep(completion_latency)
+                        logger.info(
+                            "⏱️ Дособираем остаток после частичного исполнения через %.3fс",
+                            completion_latency,
+                        )
+
+                    completion_result = {
+                        **simulated_result,
+                        'orderStatus': 'Filled',
+                        'cumExecQty': planned_amount,
+                        'leavesQty': 0.0,
+                        'isActive': False,
+                        'fillRatio': 1.0,
+                        'simulated_latency': latency + completion_latency,
+                    }
+                    results.append(completion_result)
+                    fill_ratio_effective = 1.0
+                    logger.info(
+                        "🔄 Остаток %.6f %s добран, ордер закрыт",
+                        remaining_qty,
+                        step['symbol'],
+                    )
+
+                amount_scale *= fill_ratio_effective if fill_ratio_effective > 0 else 1.0
         
         # Расчет прибыли для симуляции
         if 'estimated_profit_usdt' in trade_plan:
