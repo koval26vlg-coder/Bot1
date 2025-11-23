@@ -3356,6 +3356,7 @@ class AdvancedArbitrageEngine:
         self.performance_stats = defaultdict(lambda: {'success': 0, 'failures': 0, 'total_profit': 0})
         self.last_arbitrage_time = {}
         self.triangle_cooldown = {}
+        self.triangles_in_execution = set()
         self.ohlcv_history = {}
         self.last_strategy_context = {}
         self.last_tickers = {}
@@ -5324,64 +5325,76 @@ class AdvancedArbitrageEngine:
             )
             return False
 
-        logger.info(f"🎯 Executing arbitrage: {opportunity['triangle_name']}")
-        logger.info(f"   Profit: {opportunity['profit_percent']:.4f}%")
-        logger.info(f"   Market: {opportunity['market_conditions']}")
-
-        # Получаем фактический баланс
-        balance = self._fetch_actual_balance()
-        balance_usdt = balance['available']
-
-        # Обновляем снимок баланса в мониторинге
-        if hasattr(self, 'monitor') and hasattr(self.monitor, 'update_balance_snapshot'):
-            self.monitor.update_balance_snapshot(balance_usdt)
-
-        configured_amount = getattr(self.config, 'TRADE_AMOUNT', 0)
-        if configured_amount and balance_usdt + 1e-6 < configured_amount:
-            logger.warning(
-                "⚖️ Доступный баланс %.2f USDT ниже настроенного объёма сделки %.2f USDT",
-                balance_usdt,
-                configured_amount
+        if triangle_name in self.triangles_in_execution:
+            logger.debug(
+                "🔄 Треугольник %s уже исполняется в текущем цикле, пропускаем повтор",
+                triangle_name
             )
-
-        min_required = max(5, self.config.TRADE_AMOUNT * 0.5)
-        if balance_usdt < min_required:
-            logger.warning(
-                "❌ Недостаточный баланс: доступно %.2f USDT, требуется минимум %.2f USDT",
-                balance_usdt,
-                min_required
-            )
-            self.monitor.check_balance_health(balance_usdt)
             return False
 
-        # Рассчитываем объемы сделок
-        trade_plan = self.calculate_advanced_trade(opportunity, balance_usdt)
+        self.triangles_in_execution.add(triangle_name)
 
-        if not trade_plan:
-            logger.error("❌ Failed to calculate trade amounts")
-            return False
+        try:
+            logger.info(f"🎯 Executing arbitrage: {opportunity['triangle_name']}")
+            logger.info(f"   Profit: {opportunity['profit_percent']:.4f}%")
+            logger.info(f"   Market: {opportunity['market_conditions']}")
 
-        logger.info(
-            f"📋 Trade plan: Initial amount: {trade_plan['initial_amount']} USDT, "
-            f"Estimated profit: {trade_plan['estimated_profit_usdt']:.4f} USDT"
-        )
+            # Получаем фактический баланс
+            balance = self._fetch_actual_balance()
+            balance_usdt = balance['available']
 
-        # Выполняем арбитраж
-        success = self.execute_triangular_arbitrage(opportunity, trade_plan)
+            # Обновляем снимок баланса в мониторинге
+            if hasattr(self, 'monitor') and hasattr(self.monitor, 'update_balance_snapshot'):
+                self.monitor.update_balance_snapshot(balance_usdt)
 
-        if success:
-            self.last_arbitrage_time[triangle_name] = datetime.now()
-            logger.info("✅ Arbitrage execution completed successfully")
+            configured_amount = getattr(self.config, 'TRADE_AMOUNT', 0)
+            if configured_amount and balance_usdt + 1e-6 < configured_amount:
+                logger.warning(
+                    "⚖️ Доступный баланс %.2f USDT ниже настроенного объёма сделки %.2f USDT",
+                    balance_usdt,
+                    configured_amount
+                )
 
-            # Отправляем отчёт о производительности каждые 10 сделок через монитор
-            if len(self.trade_history) % 10 == 0:
-                performance_report = self.get_triangle_performance_report()
-                if hasattr(self, 'monitor') and hasattr(self.monitor, 'notify_performance'):
-                    self.monitor.notify_performance(performance_report)
-        else:
-            logger.error("❌ Arbitrage execution failed")
+            min_required = max(5, self.config.TRADE_AMOUNT * 0.5)
+            if balance_usdt < min_required:
+                logger.warning(
+                    "❌ Недостаточный баланс: доступно %.2f USDT, требуется минимум %.2f USDT",
+                    balance_usdt,
+                    min_required
+                )
+                self.monitor.check_balance_health(balance_usdt)
+                return False
 
-        return success
+            # Рассчитываем объемы сделок
+            trade_plan = self.calculate_advanced_trade(opportunity, balance_usdt)
+
+            if not trade_plan:
+                logger.error("❌ Failed to calculate trade amounts")
+                return False
+
+            logger.info(
+                f"📋 Trade plan: Initial amount: {trade_plan['initial_amount']} USDT, "
+                f"Estimated profit: {trade_plan['estimated_profit_usdt']:.4f} USDT"
+            )
+
+            # Выполняем арбитраж
+            success = self.execute_triangular_arbitrage(opportunity, trade_plan)
+
+            if success:
+                self.last_arbitrage_time[triangle_name] = datetime.now()
+                logger.info("✅ Arbitrage execution completed successfully")
+
+                # Отправляем отчёт о производительности каждые 10 сделок через монитор
+                if len(self.trade_history) % 10 == 0:
+                    performance_report = self.get_triangle_performance_report()
+                    if hasattr(self, 'monitor') and hasattr(self.monitor, 'notify_performance'):
+                        self.monitor.notify_performance(performance_report)
+            else:
+                logger.error("❌ Arbitrage execution failed")
+
+            return success
+        finally:
+            self.triangles_in_execution.discard(triangle_name)
 
     def get_effective_balance(self, coin='USDT'):
         """Прокси-метод для получения баланса с учётом симуляции"""
