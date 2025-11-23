@@ -4554,6 +4554,7 @@ class AdvancedArbitrageEngine:
         logger.info(f"🔺 Начало исполнения треугольного арбитража: {opportunity['triangle_name']}")
 
         start_time = datetime.now()
+        max_exec_time = getattr(self.config, 'MAX_TRIANGLE_EXECUTION_TIME', 30)
 
         try:
             # Немедленно запрашиваем актуальные тикеры по всем ногам
@@ -4615,9 +4616,24 @@ class AdvancedArbitrageEngine:
             trade_result = self.real_trader.execute_orchestrated_trade(
                 legs,
                 max_loss_usdt=trade_plan.get('estimated_profit_usdt'),
-                timeout=getattr(self.config, 'MAX_TRIANGLE_EXECUTION_TIME', 30),
+                timeout=max_exec_time,
             )
             execution_time = (datetime.now() - start_time).total_seconds()
+
+            if execution_time > max_exec_time or (trade_result and trade_result.get('status') == 'timeout'):
+                logger.error(
+                    "⏳ Тайм-аут исполнения треугольника %s (%.2fс > лимита %.2fс)",
+                    opportunity['triangle_name'],
+                    execution_time,
+                    max_exec_time,
+                )
+                cancel_helper = getattr(self.real_trader, 'contingent_orchestrator', None)
+                if cancel_helper and hasattr(cancel_helper, '_cancel_previous_orders'):
+                    cancel_helper._cancel_previous_orders(
+                        (trade_result or {}).get('executed') or (trade_result or {}).get('results') or []
+                    )
+                self._handle_triangle_timeout(opportunity, trade_plan, trade_result)
+                return False
 
             actual_profit = trade_result.get(
                 'total_profit',
@@ -4683,6 +4699,29 @@ class AdvancedArbitrageEngine:
             if hasattr(self, 'monitor') and hasattr(self.monitor, 'notify_alert'):
                 self.monitor.notify_alert(f"Ошибка треугольного арбитража: {str(e)}", "critical")
             return False
+
+    def _handle_triangle_timeout(self, opportunity: dict, trade_plan: dict, trade_result: dict | None = None) -> None:
+        """Фиксирует тайм-аут исполнения треугольника и обновляет метрики риска."""
+
+        triangle_name = opportunity.get('triangle_name')
+        if triangle_name in self.triangle_stats:
+            self.triangle_stats[triangle_name]['failures'] += 1
+            self._update_triangle_success_rate(triangle_name)
+
+        timeout_record = {
+            'timestamp': datetime.now(),
+            'trade_plan': trade_plan,
+            'results': (trade_result or {}).get('executed') or (trade_result or {}).get('results') or [],
+            'total_profit': -abs(trade_plan.get('estimated_profit_usdt', 0) or 0.01),
+            'status': 'timeout',
+            'simulated': getattr(self.real_trader, 'simulation_mode', True),
+        }
+
+        if hasattr(self.real_trader, 'trade_history'):
+            self.real_trader.trade_history.append(timeout_record)
+
+        if getattr(self.real_trader, 'risk_manager', None):
+            self.real_trader.risk_manager.update_after_trade(timeout_record)
 
     def _quick_liquidity_check(self, opportunity, trade_plan, current_tickers):
         """Быстрая оценка валидности бид-аск и спреда по всем ногам"""
@@ -5540,7 +5579,7 @@ class ContingentOrderOrchestrator:
             logger.warning("⚠️ Передан пустой список ног для оркестратора")
             return None
 
-        timeout_sec = timeout or self.default_timeout
+        timeout_sec = timeout if timeout is not None else self.default_timeout
         loss_cap = max_loss_usdt if max_loss_usdt is not None else self.loss_limit_usdt
         slippage_tolerance = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
 
@@ -5550,10 +5589,26 @@ class ContingentOrderOrchestrator:
         hedge_actions = []
         active_orders = []
         amount_scale = 1.0
+        start_time = time.time()
+        deadline_ts = start_time + timeout_sec
 
         for idx, leg in enumerate(legs, start=1):
             leg_payload = dict(leg)
             leg_payload['amount'] = float(leg_payload.get('amount', 0) or 0) * amount_scale
+
+            if time.time() >= deadline_ts:
+                logger.error("⏳ Тайм-аут цепочки до размещения шага %s/%s", idx, len(legs))
+                self._cancel_previous_orders(executed_orders + active_orders)
+                hedge = self._apply_hedge(
+                    hedge_leg,
+                    leg_payload,
+                    executed_orders,
+                    loss_cap,
+                    reason="тайм-аут цепочки",
+                )
+                if hedge:
+                    hedge_actions.append(hedge)
+                return self._build_report('timeout', executed_orders, hedge_actions, amount_scale, loss_cap)
 
             if not self._check_quote_alignment(leg_payload, slippage_tolerance):
                 logger.error("🚫 Несоответствие котировок для %s, цепочка будет остановлена", leg_payload.get('symbol'))
@@ -5564,7 +5619,27 @@ class ContingentOrderOrchestrator:
                 return self._build_report('failed', executed_orders, hedge_actions, amount_scale, loss_cap)
 
             logger.info("🧭 Оркестратор: шаг %s/%s для %s", idx, len(legs), leg_payload.get('symbol'))
-            order_result, status, fill_ratio = self._place_and_monitor(leg_payload, timeout_sec, slippage_tolerance)
+            remaining_time = max(0.0, deadline_ts - time.time())
+            if remaining_time <= 0:
+                logger.error("⏳ Тайм-аут цепочки перед мониторингом шага %s", idx)
+                self._cancel_previous_orders(executed_orders + active_orders)
+                hedge = self._apply_hedge(
+                    hedge_leg,
+                    leg_payload,
+                    executed_orders,
+                    loss_cap,
+                    reason="тайм-аут цепочки",
+                )
+                if hedge:
+                    hedge_actions.append(hedge)
+                return self._build_report('timeout', executed_orders, hedge_actions, amount_scale, loss_cap)
+
+            order_result, status, fill_ratio = self._place_and_monitor(
+                leg_payload,
+                min(timeout_sec, remaining_time),
+                slippage_tolerance,
+                deadline_ts,
+            )
 
             if order_result:
                 executed_orders.append(order_result)
@@ -5595,7 +5670,7 @@ class ContingentOrderOrchestrator:
 
         return self._build_report('completed', executed_orders, hedge_actions, amount_scale, loss_cap)
 
-    def _place_and_monitor(self, leg: dict, timeout_sec: int, slippage_tolerance: float):
+    def _place_and_monitor(self, leg: dict, timeout_sec: int, slippage_tolerance: float, deadline_ts: float | None = None):
         """Размещает ордер и ждёт его исполнения или тайм-аута"""
 
         order = self.client.place_order(
@@ -5624,7 +5699,7 @@ class ContingentOrderOrchestrator:
         start_time = time.time()
         last_status = status
 
-        while time.time() - start_time < timeout_sec:
+        while time.time() - start_time < timeout_sec and (deadline_ts is None or time.time() < deadline_ts):
             cached_status, cached_fill = self._get_ws_order_status(order_id)
             if cached_status:
                 last_status = self._normalize_status(cached_status)
@@ -5749,6 +5824,19 @@ class ContingentOrderOrchestrator:
                     logger.info("🛑 Отменён ордер %s для %s", order_id, symbol)
                 except Exception as exc:
                     logger.warning("Не удалось отменить %s: %s", order_id, exc)
+
+    def _cancel_previous_orders(self, orders: list[dict]):
+        """Отменяет уже размещённые ордера при глобальном тайм-ауте."""
+
+        for order in orders or []:
+            order_id = order.get('orderId')
+            symbol = order.get('symbol')
+            if order_id and symbol:
+                try:
+                    self.client.cancel_order(order_id, symbol)
+                    logger.info("🛑 Отменён ранее размещённый ордер %s для %s", order_id, symbol)
+                except Exception as exc:
+                    logger.warning("Не удалось отменить ранее размещённый ордер %s: %s", order_id, exc)
 
     def _apply_hedge(self, hedge_leg, failed_leg, executed_orders, loss_cap, reason: str, unfilled_ratio: float | None = None):
         """Проводит компенсирующее действие при сбое или частичном исполнении"""
@@ -6211,16 +6299,18 @@ class RealTradingExecutor:
     def _execute_real_trade(self, trade_plan):
         """Реальное исполнение торговли"""
         logger.warning("🔥 REAL MODE: Выполнение реальных ордеров")
-        
+
         if not self.risk_manager.can_execute_trade(trade_plan):
             logger.error("❌ Риск-менеджер запретил выполнение сделки")
             return None
-        
+
         try:
             results = []
             total_profit = 0
             slippage_tolerance = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
             amount_scale = 1.0
+            start_time = time.time()
+            max_exec_time = getattr(self.config, 'MAX_TRIANGLE_EXECUTION_TIME', 30)
 
             # Выполняем ордера последовательно
             for step_name, step in trade_plan.items():
@@ -6228,6 +6318,23 @@ class RealTradingExecutor:
                     # Пересчитываем объём с учётом предыдущих частичных исполнений
                     planned_amount = float(step.get('amount', 0) or 0) * amount_scale
                     trade_plan[step_name]['amount'] = planned_amount
+
+                    if time.time() - start_time > max_exec_time:
+                        logger.error("⏳ Тайм-аут исполнения сделки на шаге %s", step_name)
+                        self._cancel_previous_orders(results)
+
+                        timeout_record = {
+                            'timestamp': datetime.now(),
+                            'trade_plan': trade_plan,
+                            'results': results,
+                            'total_profit': -abs(trade_plan.get('estimated_profit_usdt', 0) or 0.01),
+                            'status': 'timeout',
+                            'simulated': False,
+                        }
+
+                        self.trade_history.append(timeout_record)
+                        self.risk_manager.update_after_trade(timeout_record)
+                        return None
 
                     market_price, _ = self._get_live_price(step['symbol'], step['side'])
 
