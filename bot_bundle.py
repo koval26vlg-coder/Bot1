@@ -3004,7 +3004,17 @@ class BybitClient:
                 logger.debug(f"❌ API error in {label}: {response.get('retMsg')}")
                 return
 
-            ticker_list = response['result'].get('list', [])
+            ticker_list = response.get('result', {}).get('list')
+            if ticker_list is None:
+                logger.debug(f"ℹ️ Пустой список тикеров в блоке {label}")
+                return
+
+            if not isinstance(ticker_list, Iterable) or isinstance(ticker_list, (str, bytes, dict)):
+                logger.debug(
+                    f"❌ Некорректный формат списка тикеров в блоке {label}: {type(ticker_list)}"
+                )
+                return
+
             for ticker_data in ticker_list:
                 symbol = ticker_data.get('symbol')
                 if symbol not in remaining_symbols:
