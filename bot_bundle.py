@@ -4596,8 +4596,27 @@ class AdvancedArbitrageEngine:
                 )
                 return False
 
-            # Мгновенно исполняем торговый план по подтвержденным ценам
-            trade_result = self.real_trader.execute_arbitrage_trade(trade_plan)
+            # Готовим список ног для оркестратора вместо прямого исполнения плана
+            legs = []
+            for step_name in sorted([k for k in trade_plan.keys() if k.startswith('step')]):
+                step = trade_plan[step_name]
+                legs.append({
+                    'symbol': step['symbol'],
+                    'side': step['side'],
+                    'amount': step['amount'],
+                    'price': step.get('price'),
+                    'type': step.get('type', 'Limit'),
+                })
+
+            if not legs:
+                logger.error("❌ Не удалось сформировать ноги для оркестратора")
+                return False
+
+            trade_result = self.real_trader.execute_orchestrated_trade(
+                legs,
+                max_loss_usdt=trade_plan.get('estimated_profit_usdt'),
+                timeout=getattr(self.config, 'MAX_TRIANGLE_EXECUTION_TIME', 30),
+            )
             execution_time = (datetime.now() - start_time).total_seconds()
 
             actual_profit = trade_result.get(
@@ -4605,17 +4624,17 @@ class AdvancedArbitrageEngine:
                 trade_plan.get('estimated_profit_usdt', 0)
             ) if trade_result else 0
 
-            if trade_result:
+            if trade_result and trade_result.get('status') == 'completed':
                 triangle_name = opportunity['triangle_name']
                 self.triangle_stats[triangle_name]['executed_trades'] += 1
-                self.triangle_stats[triangle_name]['total_profit'] += trade_plan['estimated_profit_usdt']
+                self.triangle_stats[triangle_name]['total_profit'] += actual_profit
                 self.triangle_stats[triangle_name]['last_execution'] = datetime.now()
                 self._update_triangle_success_rate(triangle_name)
 
                 logger.info(
                     "✅ Треугольный арбитраж выполнен успешно! Время: %.2fs, Прибыль: %.4f USDT",
                     execution_time,
-                    trade_plan['estimated_profit_usdt']
+                    actual_profit
                 )
 
                 trade_record = {
@@ -4628,7 +4647,7 @@ class AdvancedArbitrageEngine:
                     'execution_time': execution_time,
                     'market_conditions': opportunity['market_conditions'],
                     'triangle_stats': self.triangle_stats[triangle_name],
-                    'trade_plan': trade_plan,
+                    'trade_plan': {'legs': legs, **trade_plan},
                     'results': trade_result.get('results', []),
                     'total_profit': actual_profit,
                     'details': {
@@ -4637,7 +4656,8 @@ class AdvancedArbitrageEngine:
                         'direction': opportunity['direction'],
                         'initial_amount': trade_plan['initial_amount'],
                         'execution_path': opportunity['execution_path'],
-                        'real_executed': True
+                        'real_executed': True,
+                        'orchestrated': True,
                     }
                 }
 
@@ -4646,7 +4666,7 @@ class AdvancedArbitrageEngine:
 
                 self._record_trade(
                     opportunity,
-                    trade_plan,
+                    trade_record.get('trade_plan', trade_plan),
                     trade_result.get('results', []),
                     actual_profit
                 )
@@ -5441,6 +5461,7 @@ if __name__ == "__main__":
 # ==== Начало real_trading.py ====
 import logging
 import time
+import threading
 from collections import deque
 from datetime import datetime
 import os  # Исправлено: добавлен импорт os
@@ -5506,6 +5527,11 @@ class ContingentOrderOrchestrator:
         self.config = config
         self.default_timeout = getattr(config, 'MAX_TRIANGLE_EXECUTION_TIME', 30)
         self.loss_limit_usdt = float(os.getenv('CONTINGENT_MAX_LOSS_USDT', '10'))
+        self._order_events: dict[str, dict] = {}
+        self._order_events_lock = threading.Lock()
+
+        if hasattr(self.client, 'add_order_listener'):
+            self.client.add_order_listener(self._handle_order_event)
 
     def execute_sequence(self, legs: list[dict], hedge_leg: dict | None = None, max_loss_usdt: float | None = None, timeout: int | None = None):
         """Выполняет цепочку ног с проверкой статусов и хеджем при сбоях"""
@@ -5516,22 +5542,37 @@ class ContingentOrderOrchestrator:
 
         timeout_sec = timeout or self.default_timeout
         loss_cap = max_loss_usdt if max_loss_usdt is not None else self.loss_limit_usdt
+        slippage_tolerance = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
+
+        self._subscribe_leg_tickers(legs)
 
         executed_orders = []
         hedge_actions = []
+        active_orders = []
         amount_scale = 1.0
 
         for idx, leg in enumerate(legs, start=1):
             leg_payload = dict(leg)
             leg_payload['amount'] = float(leg_payload.get('amount', 0) or 0) * amount_scale
 
+            if not self._check_quote_alignment(leg_payload, slippage_tolerance):
+                logger.error("🚫 Несоответствие котировок для %s, цепочка будет остановлена", leg_payload.get('symbol'))
+                self._cancel_all_active(active_orders)
+                hedge = self._apply_hedge(hedge_leg, leg_payload, executed_orders, loss_cap, reason="несоответствие котировок")
+                if hedge:
+                    hedge_actions.append(hedge)
+                return self._build_report('failed', executed_orders, hedge_actions, amount_scale, loss_cap)
+
             logger.info("🧭 Оркестратор: шаг %s/%s для %s", idx, len(legs), leg_payload.get('symbol'))
-            order_result, status, fill_ratio = self._place_and_monitor(leg_payload, timeout_sec)
+            order_result, status, fill_ratio = self._place_and_monitor(leg_payload, timeout_sec, slippage_tolerance)
 
             if order_result:
                 executed_orders.append(order_result)
+                if self._normalize_status(order_result.get('orderStatus')) not in {'filled', 'cancelled'}:
+                    active_orders.append(order_result)
 
             if status in {'timeout', 'cancelled', 'failed'} or fill_ratio <= 0:
+                self._cancel_all_active(active_orders)
                 hedge = self._apply_hedge(hedge_leg, leg_payload, executed_orders, loss_cap, reason="сбой шага")
                 if hedge:
                     hedge_actions.append(hedge)
@@ -5539,6 +5580,7 @@ class ContingentOrderOrchestrator:
 
             if status == 'partial' and fill_ratio < 1.0:
                 amount_scale *= fill_ratio
+                self._cancel_all_active(active_orders)
                 hedge = self._apply_hedge(
                     hedge_leg,
                     leg_payload,
@@ -5549,10 +5591,11 @@ class ContingentOrderOrchestrator:
                 )
                 if hedge:
                     hedge_actions.append(hedge)
+                return self._build_report('partial', executed_orders, hedge_actions, amount_scale, loss_cap)
 
         return self._build_report('completed', executed_orders, hedge_actions, amount_scale, loss_cap)
 
-    def _place_and_monitor(self, leg: dict, timeout_sec: int):
+    def _place_and_monitor(self, leg: dict, timeout_sec: int, slippage_tolerance: float):
         """Размещает ордер и ждёт его исполнения или тайм-аута"""
 
         order = self.client.place_order(
@@ -5582,6 +5625,23 @@ class ContingentOrderOrchestrator:
         last_status = status
 
         while time.time() - start_time < timeout_sec:
+            cached_status, cached_fill = self._get_ws_order_status(order_id)
+            if cached_status:
+                last_status = self._normalize_status(cached_status)
+                fill_ratio = cached_fill if cached_fill is not None else fill_ratio
+                if last_status in {'filled', 'cancelled'}:
+                    order['orderStatus'] = cached_status
+                    base_qty = self._safe_float(order.get('qty'))
+                    order['cumExecQty'] = (
+                        order.get('cumExecQty') or base_qty if cached_fill is None else cached_fill * base_qty
+                    )
+                    return order, last_status, fill_ratio
+
+            if not self._check_quote_alignment(leg, slippage_tolerance):
+                logger.error("📉 Котировки ушли за предел допуска по %s", symbol)
+                self.client.cancel_order(order_id, symbol)
+                return order, 'failed', fill_ratio
+
             fetched = self.client.get_order_status(order_id, symbol) or {}
             if fetched:
                 order.update(fetched)
@@ -5595,6 +5655,100 @@ class ContingentOrderOrchestrator:
 
         logger.error("⏳ Тайм-аут исполнения ордера %s", order_id)
         return order, last_status or 'timeout', fill_ratio
+
+    def _subscribe_leg_tickers(self, legs: list[dict]):
+        """Подписывается на все ногами цепочки для получения свежих котировок."""
+
+        if not getattr(self.client, 'ws_manager', None):
+            return
+
+        symbols = {leg.get('symbol') for leg in legs if leg.get('symbol')}
+        try:
+            existing = getattr(self.client.ws_manager, '_symbols', set()) or set()
+            updated = list(existing.union(symbols))
+            self.client.ws_manager.start(updated)
+            logger.info("📡 Подписка на WebSocket тикеры для ног: %s", ', '.join(sorted(symbols)))
+        except Exception as exc:
+            logger.debug("Не удалось обновить подписку на котировки: %s", exc)
+
+    def _handle_order_event(self, event: dict):
+        """Сохраняет последнюю информацию об ордерах из приватного стрима."""
+
+        order_id = event.get('orderId')
+        if not order_id:
+            return
+
+        with self._order_events_lock:
+            self._order_events[order_id] = {
+                'status': event.get('orderStatus'),
+                'cumExecQty': event.get('cumExecQty'),
+                'qty': event.get('qty') or event.get('leavesQty'),
+            }
+
+    def _get_ws_order_status(self, order_id: str) -> tuple[str | None, float | None]:
+        """Возвращает статус и долю исполнения из WebSocket, если доступно."""
+
+        with self._order_events_lock:
+            event = self._order_events.get(order_id)
+
+        if not event:
+            return None, None
+
+        status = self._normalize_status(event.get('status'))
+        fill_ratio = None
+        try:
+            qty = self._safe_float(event.get('qty'))
+            filled = self._safe_float(event.get('cumExecQty'))
+            if qty > 0:
+                fill_ratio = min(1.0, filled / qty)
+        except Exception:
+            fill_ratio = None
+
+        return status, fill_ratio
+
+    def _check_quote_alignment(self, leg: dict, tolerance: float) -> bool:
+        """Сверяет плановую цену с актуальными котировками из WebSocket."""
+
+        symbol = leg.get('symbol')
+        target_price = leg.get('price')
+        side = (leg.get('side') or '').lower()
+
+        if not symbol or not target_price or not getattr(self.client, 'ws_manager', None):
+            return True
+
+        cached, _ = self.client.ws_manager.get_cached_tickers([symbol])
+        ticker = cached.get(symbol) if cached else None
+        if not ticker:
+            return True
+
+        market_price = ticker.get('ask') if side == 'buy' else ticker.get('bid')
+        if not market_price:
+            return True
+
+        deviation = abs(target_price - market_price) / target_price if target_price else 0
+        if deviation > tolerance:
+            logger.warning(
+                "⚠️ Цена для %s ушла на %.4f%% (допуск %.4f%%)",
+                symbol,
+                deviation * 100,
+                tolerance * 100,
+            )
+            return False
+
+        return True
+
+    def _cancel_all_active(self, active_orders: list[dict]):
+        """Отменяет все активные ордера цепочки."""
+
+        for order in active_orders or []:
+            order_id = order.get('orderId')
+            symbol = order.get('symbol')
+            if order_id and symbol:
+                try:
+                    self.client.cancel_order(order_id, symbol)
+                    logger.info("🛑 Отменён ордер %s для %s", order_id, symbol)
+                except Exception as exc:
+                    logger.warning("Не удалось отменить %s: %s", order_id, exc)
 
     def _apply_hedge(self, hedge_leg, failed_leg, executed_orders, loss_cap, reason: str, unfilled_ratio: float | None = None):
         """Проводит компенсирующее действие при сбое или частичном исполнении"""
@@ -6028,11 +6182,17 @@ class RealTradingExecutor:
 
         fill_ratio = min(1.0, executed_qty / requested_qty)
 
+        if not market_price and getattr(self.client, 'ws_manager', None):
+            cached, _ = self.client.ws_manager.get_cached_tickers([step['symbol']])
+            ticker = cached.get(step['symbol']) if cached else None
+            if ticker:
+                market_price = ticker.get('ask') if (step.get('side') or '').lower() == 'buy' else ticker.get('bid')
+
         if market_price and avg_price:
             deviation = abs(avg_price - market_price) / market_price
             if deviation > tolerance:
                 logger.error(
-                    "🔥 Фактическая цена исполнения отклоняется на %.4f%% (допуск %.4f%%)",
+                    "🔥 Фактическая цена исполнения отклоняется на %.4f%% (допуск %.4f%%) по данным WebSocket",
                     deviation * 100,
                     tolerance * 100,
                 )
