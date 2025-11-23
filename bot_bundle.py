@@ -4035,8 +4035,9 @@ class AdvancedArbitrageEngine:
                 triangle.get('name', 'unknown'),
                 direction
             )
-            if path:
+            if path and self.validate_triangle_path(path, base_currency):
                 break
+            path = None
 
         if not path:
             profit = -100
@@ -4073,6 +4074,73 @@ class AdvancedArbitrageEngine:
             if perm_list not in unique_sequences:
                 unique_sequences.append(perm_list)
         return unique_sequences
+
+    def validate_triangle_path(self, path, base_currency):
+        """Проверка корректности построенного треугольного пути."""
+
+        if not path or len(path) != 3:
+            logger.warning(
+                "Путь отклонен: ожидалось 3 шага треугольника, получено %s",
+                len(path) if path else 0,
+            )
+            return False
+
+        currencies = {base_currency}
+        current_asset = base_currency
+
+        for index, step in enumerate(path, start=1):
+            symbol = step.get('symbol')
+            side = step.get('side')
+
+            if not symbol or side not in {'Buy', 'Sell'}:
+                logger.warning(
+                    "Путь отклонен: шаг %s содержит некорректные данные (%s)",
+                    index,
+                    step,
+                )
+                return False
+
+            base_cur, quote_cur = self._get_symbol_currencies(symbol)
+            currencies.update([base_cur, quote_cur])
+
+            if len(currencies) > 3:
+                logger.warning(
+                    "Путь отклонен: символ %s добавляет лишнюю валюту, набор=%s",
+                    symbol,
+                    currencies,
+                )
+                return False
+
+            if side == 'Buy':
+                if current_asset != quote_cur:
+                    logger.warning(
+                        "Путь отклонен: шаг %s требует валюту котировки %s, текущая %s",
+                        index,
+                        quote_cur,
+                        current_asset,
+                    )
+                    return False
+                current_asset = base_cur
+            else:
+                if current_asset != base_cur:
+                    logger.warning(
+                        "Путь отклонен: шаг %s требует базовую валюту %s, текущая %s",
+                        index,
+                        base_cur,
+                        current_asset,
+                    )
+                    return False
+                current_asset = quote_cur
+
+        if current_asset != base_currency:
+            logger.warning(
+                "Путь отклонен: цикл не возвращается к базовой валюте %s (текущая %s)",
+                base_currency,
+                current_asset,
+            )
+            return False
+
+        return True
 
     def _build_universal_path(self, legs_sequence, base_currency, triangle_name, direction):
         """Универсальное построение пути на основе текущей валюты"""
