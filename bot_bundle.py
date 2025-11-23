@@ -101,6 +101,14 @@ class Config:
             'SIMULATION_PARTIAL_FILL_PROB',
             0.0,
         )
+        self._simulation_reject_probability = self._load_float_env(
+            'SIMULATION_REJECT_PROB',
+            0.0,
+        )
+        self._simulation_liquidity_buffer = self._load_float_env(
+            'SIMULATION_LIQUIDITY_BUFFER',
+            0.0,
+        )
         self._simulation_auto_complete_partials = os.getenv(
             'SIMULATION_AUTO_COMPLETE_PARTIALS',
             'true',
@@ -276,6 +284,16 @@ class Config:
     def SIMULATION_PARTIAL_FILL_PROBABILITY(self):
         """Вероятность частичного исполнения ордера в симуляции (0..1)."""
         return self._simulation_partial_fill_probability
+
+    @property
+    def SIMULATION_REJECT_PROBABILITY(self):
+        """Вероятность принудительного отказа ордера в симуляции (0..1)."""
+        return self._simulation_reject_probability
+
+    @property
+    def SIMULATION_LIQUIDITY_BUFFER(self):
+        """Доля недоступной ликвидности в симуляции (0..1), имитирует пустой стакан."""
+        return self._simulation_liquidity_buffer
 
     @property
     def SIMULATION_AUTO_COMPLETE_PARTIALS(self):
@@ -6484,8 +6502,13 @@ class RealTradingExecutor:
         )
         latency_range = getattr(self.config, 'SIMULATION_LATENCY_RANGE', (0.05, 0.2))
         partial_probability = getattr(self.config, 'SIMULATION_PARTIAL_FILL_PROBABILITY', 0.0)
+        reject_probability = getattr(self.config, 'SIMULATION_REJECT_PROBABILITY', 0.0)
+        liquidity_buffer = getattr(self.config, 'SIMULATION_LIQUIDITY_BUFFER', 0.0)
         auto_complete_partials = getattr(self.config, 'SIMULATION_AUTO_COMPLETE_PARTIALS', True)
         amount_scale = 1.0
+        overall_status = 'completed'
+        status_reason = None
+        rejected_orders: list[dict] = []
 
         for step_name, step in trade_plan.items():
             if step_name.startswith('step') or step_name in ['leg1', 'leg2']:
@@ -6507,6 +6530,15 @@ class RealTradingExecutor:
                 if market_price:
                     base_price = market_price
 
+                forced_rejection = random.random() < max(0.0, reject_probability)
+                available_liquidity = self._safe_float(
+                    ticker_snapshot.get('bidSize') if (step.get('side') or '').lower() == 'sell' else ticker_snapshot.get('askSize'),
+                    planned_amount,
+                )
+                if available_liquidity <= 0:
+                    available_liquidity = planned_amount * max(0.0, random.uniform(0.5, 1.2))
+                liquidity_shortage = planned_amount > 0 and available_liquidity < planned_amount * (1 - max(0.0, liquidity_buffer))
+
                 slippage = max(0.0, min(slippage_tolerance, random.uniform(0, slippage_tolerance)))
 
                 if base_price > 0:
@@ -6527,12 +6559,19 @@ class RealTradingExecutor:
 
                 triggered_partial = planned_amount > 0 and random.random() < partial_probability
                 fill_ratio = random.uniform(0.4, 0.95) if triggered_partial else 1.0
+
+                if liquidity_shortage:
+                    fill_ratio = min(fill_ratio, available_liquidity / planned_amount if planned_amount else 0)
+
+                if forced_rejection:
+                    fill_ratio = 0.0
+
                 executed_qty = planned_amount * fill_ratio if planned_amount else 0
                 remaining_qty = max(planned_amount - executed_qty, 0)
 
                 simulated_result = {
                     'orderId': f"sim_{int(time.time())}_{step_name}",
-                    'orderStatus': 'PartiallyFilled' if fill_ratio < 1 else 'Filled',
+                    'orderStatus': 'Rejected' if forced_rejection else 'PartiallyFilled' if fill_ratio < 1 else 'Filled',
                     'symbol': step['symbol'],
                     'side': step['side'],
                     'qty': planned_amount,
@@ -6544,16 +6583,66 @@ class RealTradingExecutor:
                     'simulated': True,
                     'timestamp': datetime.now().isoformat(),
                     'applied_slippage': slippage,
-                    'simulated_latency': latency
+                    'simulated_latency': latency,
+                    'simulatedStatus': 'rejected' if forced_rejection else 'partial' if fill_ratio < 1 else 'filled',
                 }
+                if forced_rejection:
+                    status_reason = "Вероятностный отказ симуляции"
+                    overall_status = 'rejected'
+                    rejected_orders.append(simulated_result)
+                    results.append(simulated_result)
+                    logger.error(
+                        "❌ Симулированный отказ: %s %.6f %s @ %.2f (причина: %s)",
+                        step['side'],
+                        planned_amount,
+                        step['symbol'],
+                        execution_price or step['price'],
+                        status_reason,
+                    )
+                    self._cancel_previous_orders(results)
+                    break
+
+                if liquidity_shortage and fill_ratio == 0:
+                    status_reason = "Недостаточная ликвидность в симулированном стакане"
+                    overall_status = 'rejected'
+                    rejected_orders.append(simulated_result)
+                    results.append(simulated_result)
+                    logger.error(
+                        "❌ Симулированный отказ по ликвидности: %s %.6f %s (доступно %.6f)",
+                        step['side'],
+                        planned_amount,
+                        step['symbol'],
+                        available_liquidity,
+                    )
+                    self._cancel_previous_orders(results)
+                    break
+
                 results.append(simulated_result)
-                logger.info(
-                    "✅ SIMULATED: %s %.6f %s @ %.2f",
-                    step['side'],
-                    planned_amount,
-                    step['symbol'],
-                    execution_price or step['price']
-                )
+                if liquidity_shortage and fill_ratio < 1:
+                    status_reason = "Частичное исполнение из-за нехватки ликвидности"
+                    overall_status = 'partial'
+                    logger.warning(
+                        "⚠️ Симуляция: нехватка ликвидности, исполнено %.6f из %.6f для %s",
+                        executed_qty,
+                        planned_amount,
+                        step['symbol'],
+                    )
+                elif fill_ratio < 1:
+                    overall_status = 'partial'
+                    logger.info(
+                        "ℹ️ Симуляция: частичное исполнение %.6f из %.6f для %s",
+                        executed_qty,
+                        planned_amount,
+                        step['symbol'],
+                    )
+                else:
+                    logger.info(
+                        "✅ Симулированный ордер: %s %.6f %s @ %.2f",
+                        step['side'],
+                        planned_amount,
+                        step['symbol'],
+                        execution_price or step['price']
+                    )
 
                 fill_ratio_effective = self._handle_partial_fill(
                     trade_plan[step_name],
@@ -6563,7 +6652,12 @@ class RealTradingExecutor:
                 )
                 simulated_result['fillRatio'] = fill_ratio_effective
 
-                if fill_ratio < 1 and auto_complete_partials and remaining_qty > 0:
+                if (
+                    fill_ratio < 1
+                    and auto_complete_partials
+                    and remaining_qty > 0
+                    and not liquidity_shortage
+                ):
                     completion_latency = max(
                         0.0,
                         random.uniform(latency_range[0], latency_range[1])
@@ -6593,22 +6687,37 @@ class RealTradingExecutor:
                     )
 
                 amount_scale *= fill_ratio_effective if fill_ratio_effective > 0 else 1.0
-        
+
         # Расчет прибыли для симуляции
         if 'estimated_profit_usdt' in trade_plan:
             total_profit = trade_plan['estimated_profit_usdt']
-        
+
         trade_record = {
             'timestamp': datetime.now(),
             'trade_plan': trade_plan,
             'results': results,
             'total_profit': total_profit,
-            'simulated': True
+            'simulated': True,
+            'status': overall_status,
+            'rejected': rejected_orders,
+            'status_reason': status_reason,
         }
-        
+
         self.trade_history.append(trade_record)
-        logger.info(f"💰 SIMULATED PROFIT: {total_profit:.4f} USDT")
-        
+        if overall_status == 'rejected':
+            logger.error(
+                "💔 Симуляция завершена отказом: прибыль %.4f USDT, причина: %s",
+                total_profit,
+                status_reason or 'неизвестно'
+            )
+        elif overall_status == 'partial':
+            logger.warning(
+                "⚠️ Симуляция завершена частично: прибыль %.4f USDT, есть незакрытые объёмы",
+                total_profit,
+            )
+        else:
+            logger.info(f"💰 SIMULATED PROFIT: {total_profit:.4f} USDT")
+
         return trade_record
 
     def _get_live_price(self, symbol: str, side: str) -> tuple[float | None, dict]:
@@ -6814,7 +6923,12 @@ class RealTradingExecutor:
         """Отмена предыдущих ордеров при ошибке"""
         for order in results:
             if 'orderId' in order:
-                self.client.cancel_order(order['orderId'], order['symbol'])
+                if self.simulation_mode or order.get('simulated'):
+                    logger.warning(
+                        "🛑 Отмена симулированного ордера %s по %s", order['orderId'], order.get('symbol')
+                    )
+                else:
+                    self.client.cancel_order(order['orderId'], order['symbol'])
     
     def _calculate_real_profit(self, results, trade_plan):
         """Расчет реальной прибыли на основе исполненных ордеров"""
