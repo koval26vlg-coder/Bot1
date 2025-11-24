@@ -839,6 +839,13 @@ class OptimizedConfig(Config):
     @property
     def TRADE_AMOUNT(self):
         """Увеличенная сумма сделки в тестнете для более заметных результатов."""
+        if "_TRADE_AMOUNT" in self.__dict__:
+            return self._TRADE_AMOUNT
+
+        override = getattr(self, "_trade_amount_override", None)
+        if override is not None:
+            return override
+
         if self.TESTNET:
             return 15
         return Config.TRADE_AMOUNT.fget(self)

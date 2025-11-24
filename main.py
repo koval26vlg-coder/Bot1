@@ -57,6 +57,17 @@ def _prepare_quick_config(min_profit: float | None, trade_amount: float | None) 
         optimized._TRADE_AMOUNT = trade_amount
 
     logging.info("Используется OptimizedConfig в режиме тестнета")
+
+    if trade_amount is not None:
+        logging.info(
+            "Применён пользовательский объём сделки для режима quick: %s USDT",
+            optimized.TRADE_AMOUNT,
+        )
+    else:
+        logging.info(
+            "Используется стандартный объём сделки для режима quick: %s USDT",
+            optimized.TRADE_AMOUNT,
+        )
     return optimized
 
 
