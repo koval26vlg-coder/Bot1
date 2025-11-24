@@ -72,6 +72,8 @@ class Config:
     ]
     # Поддерживаемые стартовые валюты для построения треугольников
     TRADING_BASE_CURRENCIES = ['USDT']
+    # Базовая допустимая давность котировок перед предупреждением (секунды)
+    TICKER_STALENESS_WARNING_SEC_DEFAULT = 5.0
 
     def __init__(self):
         self._triangular_pairs_cache = None
@@ -102,7 +104,7 @@ class Config:
         )
         self._ticker_staleness_warning = self._load_float_env(
             'TICKER_STALENESS_WARNING_SEC',
-            5.0
+            self.TICKER_STALENESS_WARNING_SEC_DEFAULT,
         )
         self._simulation_slippage_tolerance = self._load_float_env(
             'SIMULATION_SLIPPAGE_TOLERANCE',
@@ -2609,7 +2611,10 @@ class BybitWebSocketManager:
         self._stop_event = threading.Event()
         self._monitor_thread = None
         self._last_ticker_ts = 0
-        self._max_staleness = max(getattr(self.config, '_ticker_staleness_warning', 5.0) * 2, 1.0)
+        self._max_staleness = max(
+            getattr(self.config, 'TICKER_STALENESS_WARNING_SEC', 5.0) * 2,
+            1.0,
+        )
         # Сегмент рынка заранее синхронизируем с REST-клиентом, чтобы избежать ошибок доступа
         self.market_category = getattr(self.config, "MARKET_CATEGORY", "spot")
 
@@ -3086,7 +3091,7 @@ class BybitClient:
         if self.ws_manager:
             cache_hits, fresh_missing = self.ws_manager.get_cached_tickers(
                 requested_symbols,
-                max_age=getattr(self.config, '_ticker_staleness_warning', 5.0),
+                max_age=getattr(self.config, 'TICKER_STALENESS_WARNING_SEC', 5.0),
             )
             tickers.update(cache_hits)
             remaining_symbols = set(fresh_missing)
