@@ -127,6 +127,9 @@ class Config:
         ).lower() == 'true'
         self._market_symbols_limit = self._load_int_env('MARKET_SYMBOLS_LIMIT', 0)
         self.WEBSOCKET_PRICE_ONLY = os.getenv('WEBSOCKET_PRICE_ONLY', 'false').lower() == 'true'
+        self.ENABLE_ASYNC_MARKET_CLIENT = os.getenv('ENABLE_ASYNC_MARKET_CLIENT', 'false').lower() == 'true'
+        self.USE_LEGACY_TICKER_CLIENT = os.getenv('USE_LEGACY_TICKER_CLIENT', 'false').lower() == 'true'
+        self.ASYNC_TICKER_CONCURRENCY = self._load_int_env('ASYNC_TICKER_CONCURRENCY', 6)
         self.PAPER_TRADING_MODE = os.getenv('PAPER_TRADING_MODE', 'false').lower() == 'true'
         self.PAPER_BOOK_IMPACT = self._load_float_env('PAPER_BOOK_IMPACT', 0.05)
         self.REPLAY_DATA_PATH = os.getenv('REPLAY_DATA_PATH')
@@ -3744,6 +3747,7 @@ class OkxClient:
 # ==== Конец okx_client.py ====
 
 # ==== Начало advanced_arbitrage_engine.py ====
+import asyncio
 import csv
 import inspect
 import logging
@@ -3753,6 +3757,7 @@ from datetime import datetime
 from itertools import permutations
 from pathlib import Path
 
+from async_bybit_client import AsyncBybitClient
 from bybit_client import BybitClient
 from okx_client import OkxClient
 from config import Config
@@ -3774,6 +3779,7 @@ class AdvancedArbitrageEngine:
         base_config = config or Config()
 
         self.client = self._create_client(base_config)
+        self.async_market_client = self._create_async_market_client(base_config)
         self.monitor = AdvancedMonitor(self)
         self.real_trader = RealTradingExecutor(base_config)
         self.strategy_manager = None
@@ -3792,6 +3798,22 @@ class AdvancedArbitrageEngine:
             return OkxClient(config=cfg)
         return BybitClient(config=cfg)
 
+    def _create_async_market_client(self, cfg: Config):
+        """Создаёт асинхронный клиент только для получения котировок."""
+
+        prefers_async = getattr(cfg, 'ENABLE_ASYNC_MARKET_CLIENT', False)
+        legacy_forced = getattr(cfg, 'USE_LEGACY_TICKER_CLIENT', False)
+        exchange = getattr(cfg, 'PRIMARY_EXCHANGE', 'bybit').lower()
+
+        if not prefers_async or legacy_forced or exchange != 'bybit':
+            return None
+
+        try:
+            return AsyncBybitClient(config=cfg)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось создать асинхронный клиент: %s", exc)
+            return None
+
     def _apply_config(self, new_config, *, reset_state=True, recreate_client=True):
         """Подменяет конфигурацию и пересобирает связанные структуры."""
 
@@ -3802,7 +3824,13 @@ class AdvancedArbitrageEngine:
         self.config = new_config
 
         if recreate_client:
+            if self.async_market_client and hasattr(self.async_market_client, 'close'):
+                try:
+                    asyncio.run(self.async_market_client.close())
+                except RuntimeError:
+                    pass
             self.client = self._create_client(new_config)
+            self.async_market_client = self._create_async_market_client(new_config)
 
         self.cooldown_period = getattr(self.config, 'COOLDOWN_PERIOD', None) or 180
 
@@ -3842,6 +3870,133 @@ class AdvancedArbitrageEngine:
             raise ImportError(
                 f"Метод _initialize_triangle_stats загружен из другого файла: {method_file}. Ожидался {module_path}"
             )
+
+    def _should_use_async_market(self) -> bool:
+        """Проверяет, активирован ли асинхронный сбор тикеров."""
+
+        legacy_forced = getattr(self.config, 'USE_LEGACY_TICKER_CLIENT', False)
+        return bool(
+            self.async_market_client
+            and getattr(self.config, 'ENABLE_ASYNC_MARKET_CLIENT', False)
+            and not legacy_forced
+        )
+
+    def _collect_watchlist_symbols(self) -> set:
+        """Собирает полный список тикеров для запроса котировок."""
+
+        all_symbols = set(self.config.SYMBOLS)
+        for triangle in self.config.TRIANGULAR_PAIRS:
+            for symbol in triangle['legs']:
+                all_symbols.add(symbol)
+        return all_symbols
+
+    async def _fetch_tickers_async(self, symbols: list[str]):
+        """Асинхронно получает тикеры, поддерживая как async, так и синхронный клиент."""
+
+        if self.async_market_client and hasattr(self.async_market_client, 'get_tickers_async'):
+            return await self.async_market_client.get_tickers_async(symbols)
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.client.get_tickers, symbols)
+
+    def _fetch_tickers_sync(self, symbols: list[str]):
+        """Синхронно получает тикеры, вызывая асинхронный клиент через asyncio при необходимости."""
+
+        if self._should_use_async_market():
+            try:
+                return asyncio.run(self._fetch_tickers_async(symbols))
+            except RuntimeError:
+                created_loop = False
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    created_loop = True
+
+                if loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._fetch_tickers_async(symbols),
+                        loop,
+                    )
+                    return future.result()
+
+                try:
+                    return loop.run_until_complete(self._fetch_tickers_async(symbols))
+                finally:
+                    if created_loop and not loop.is_running():
+                        loop.close()
+
+        return self.client.get_tickers(symbols)
+
+    def _process_opportunity_search(self, tickers, all_symbols):
+        """Общий постпроцессинг поиска возможностей после загрузки котировок."""
+
+        if not tickers:
+            logger.warning("❌ No ticker data received")
+            return []
+
+        available_symbols = set(tickers)
+        missing_symbols = all_symbols - available_symbols
+        if missing_symbols:
+            logger.warning(
+                "⚠️ Часть тикеров временно недоступна и исключена из оценки: %s",
+                ", ".join(sorted(missing_symbols)),
+            )
+
+        self.update_market_data(tickers)
+        self.last_tickers = tickers
+        market_data = self._build_market_dataframe()
+
+        strategy_result = self.evaluate_strategies(market_data)
+        active_strategy_name = self.strategy_manager.get_active_strategy_name()
+        logger.info(
+            "⚙️ Strategy mode=%s | Active=%s",
+            self.config.STRATEGY_MODE,
+            active_strategy_name
+        )
+
+        opportunities = self.detect_triangular_arbitrage(tickers, strategy_result)
+
+        if opportunities:
+            self.no_opportunity_cycles = 0
+        else:
+            self.no_opportunity_cycles += 1
+            logger.debug(
+                "Нет треугольных возможностей %s циклов подряд",
+                self.no_opportunity_cycles
+            )
+
+            if self.no_opportunity_cycles >= 3:
+                aggressive = self._generate_aggressive_opportunities_from_cache(strategy_result)
+                if aggressive:
+                    logger.warning(
+                        "⚡ Активирован агрессивный режим: добавлено %s синтетических возможностей",
+                        len(aggressive)
+                    )
+                    opportunities.extend(aggressive)
+                    self.no_opportunity_cycles = 0
+
+        if strategy_result:
+            for opportunity in opportunities:
+                opportunity['strategy'] = strategy_result.name
+                opportunity['strategy_signal'] = strategy_result.signal
+                opportunity['strategy_confidence'] = strategy_result.confidence
+        else:
+            for opportunity in opportunities:
+                opportunity['strategy'] = active_strategy_name
+                opportunity['strategy_signal'] = 'neutral'
+                opportunity['strategy_confidence'] = 0
+
+        if opportunities:
+            logger.info(f"🎯 Found {len(opportunities)} triangular arbitrage opportunities:")
+            for i, opp in enumerate(opportunities[:5], 1):
+                logger.info(f"   {i}. {opp['triangle_name']} - {opp['profit_percent']:.4f}% - "
+                          f"Direction: {opp['direction']}")
+        else:
+            logger.info("🔍 No arbitrage opportunities found")
+
+        return opportunities
 
     def _initialize_data_structures(self):
         """Вынос инициализации структур данных в отдельный метод."""
@@ -5299,7 +5454,7 @@ class AdvancedArbitrageEngine:
 
         try:
             # Немедленно запрашиваем актуальные тикеры по всем ногам
-            current_tickers = self.client.get_tickers(opportunity['symbols'])
+            current_tickers = self._fetch_tickers_sync(opportunity['symbols'])
             if not current_tickers:
                 logger.warning("❌ Не удалось получить тикеры для проверки возможности")
                 triangle_name = opportunity.get('triangle_name')
@@ -5656,86 +5811,16 @@ class AdvancedArbitrageEngine:
 
     def detect_opportunities(self):
         """Основной метод для обнаружения арбитражных возможностей"""
-        # Получаем все необходимые символы
-        all_symbols = set(self.config.SYMBOLS)
-        for triangle in self.config.TRIANGULAR_PAIRS:
-            for symbol in triangle['legs']:
-                all_symbols.add(symbol)
+        all_symbols = self._collect_watchlist_symbols()
+        tickers = self._fetch_tickers_sync(list(all_symbols))
+        return self._process_opportunity_search(tickers, all_symbols)
 
-        tickers = self.client.get_tickers(list(all_symbols))
+    async def detect_opportunities_async(self):
+        """Асинхронный вариант поиска возможностей с ожиданием загрузки котировок."""
 
-        if not tickers:
-            logger.warning("❌ No ticker data received")
-            return []
-
-        available_symbols = set(tickers)
-        missing_symbols = all_symbols - available_symbols
-        if missing_symbols:
-            logger.warning(
-                "⚠️ Часть тикеров временно недоступна и исключена из оценки: %s",
-                ", ".join(sorted(missing_symbols)),
-            )
-
-        # Обновляем рыночные данные
-        self.update_market_data(tickers)
-
-        # Сохраняем последние цены для визуализации
-        self.last_tickers = tickers
-
-        market_data = self._build_market_dataframe()
-
-        # Оцениваем стратегии уже на свежих данных
-        strategy_result = self.evaluate_strategies(market_data)
-        active_strategy_name = self.strategy_manager.get_active_strategy_name()
-        logger.info(
-            "⚙️ Strategy mode=%s | Active=%s",
-            self.config.STRATEGY_MODE,
-            active_strategy_name
-        )
-
-        # Обнаружение треугольного арбитража
-        opportunities = self.detect_triangular_arbitrage(tickers, strategy_result)
-
-        if opportunities:
-            self.no_opportunity_cycles = 0
-        else:
-            self.no_opportunity_cycles += 1
-            logger.debug(
-                "Нет треугольных возможностей %s циклов подряд",
-                self.no_opportunity_cycles
-            )
-
-            if self.no_opportunity_cycles >= 3:
-                aggressive = self._generate_aggressive_opportunities_from_cache(strategy_result)
-                if aggressive:
-                    logger.warning(
-                        "⚡ Активирован агрессивный режим: добавлено %s синтетических возможностей",
-                        len(aggressive)
-                    )
-                    opportunities.extend(aggressive)
-                    self.no_opportunity_cycles = 0
-
-        if strategy_result:
-            for opportunity in opportunities:
-                opportunity['strategy'] = strategy_result.name
-                opportunity['strategy_signal'] = strategy_result.signal
-                opportunity['strategy_confidence'] = strategy_result.confidence
-        else:
-            for opportunity in opportunities:
-                opportunity['strategy'] = active_strategy_name
-                opportunity['strategy_signal'] = 'neutral'
-                opportunity['strategy_confidence'] = 0
-
-        # Логируем результаты
-        if opportunities:
-            logger.info(f"🎯 Found {len(opportunities)} triangular arbitrage opportunities:")
-            for i, opp in enumerate(opportunities[:5], 1):  # Показываем топ-5
-                logger.info(f"   {i}. {opp['triangle_name']} - {opp['profit_percent']:.4f}% - "
-                          f"Direction: {opp['direction']}")
-        else:
-            logger.info("🔍 No arbitrage opportunities found")
-        
-        return opportunities
+        all_symbols = self._collect_watchlist_symbols()
+        tickers = await self._fetch_tickers_async(list(all_symbols))
+        return self._process_opportunity_search(tickers, all_symbols)
 
     def _calculate_aggressive_alpha(self, strategy_result, candidate):
         """Расчет надбавки к ожидаемой прибыли на основе стратегий"""
