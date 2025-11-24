@@ -2772,6 +2772,7 @@ class BybitClient:
         self.market_category = getattr(self.config, "MARKET_CATEGORY", "spot")
         self.ws_manager = None
         self.order_error_metrics = defaultdict(int)
+        self._temporarily_unavailable_symbols = set()
         self._initialize_websocket_streams()
         logger.info(
             "Bybit client initialized. Testnet: %s, Account type: %s, Market category: %s",
@@ -2918,8 +2919,16 @@ class BybitClient:
         if not requested_symbols:
             return tickers
 
-        cache_hits = {}
+        blocked_symbols = set(requested_symbols) & self._temporarily_unavailable_symbols
         remaining_symbols = set(requested_symbols)
+
+        if blocked_symbols:
+            logger.warning(
+                "⏳ Пропускаем REST-запросы для временно недоступных тикеров: %s",
+                ", ".join(sorted(blocked_symbols)),
+            )
+
+        cache_hits = {}
 
         if self.ws_manager:
             cache_hits, fresh_missing = self.ws_manager.get_cached_tickers(
@@ -2928,6 +2937,14 @@ class BybitClient:
             )
             tickers.update(cache_hits)
             remaining_symbols = set(fresh_missing)
+
+            recovered = set(cache_hits) & self._temporarily_unavailable_symbols
+            if recovered:
+                logger.info(
+                    "✅ Тикеры снова появились и удалены из карантина: %s",
+                    ", ".join(sorted(recovered)),
+                )
+                self._temporarily_unavailable_symbols.difference_update(recovered)
 
             if not remaining_symbols:
                 logger.debug("♻️ Используем кэш WebSocket для всех тикеров")
@@ -3029,6 +3046,7 @@ class BybitClient:
                     'timestamp': ticker_data.get('time')
                 }
                 remaining_symbols.discard(symbol)
+                self._temporarily_unavailable_symbols.discard(symbol)
                 logger.debug(
                     f"✅ {symbol}: bid={tickers[symbol]['bid']}, ask={tickers[symbol]['ask']} (source={label})"
                 )
@@ -3037,6 +3055,10 @@ class BybitClient:
         try:
             cursor = None
             while True:
+                fetchable_symbols = remaining_symbols - blocked_symbols
+                if not fetchable_symbols:
+                    break
+
                 params = {'category': self.market_category}
                 if cursor:
                     params['cursor'] = cursor
@@ -3049,7 +3071,7 @@ class BybitClient:
                 _extract_from_response(response, 'bulk')
 
                 cursor = response.get('result', {}).get('nextPageCursor') if response else None
-                if not cursor or not remaining_symbols:
+                if not cursor or not (remaining_symbols - blocked_symbols):
                     break
 
         except RuntimeError:
@@ -3058,7 +3080,7 @@ class BybitClient:
             logger.debug(f"🔥 Bulk request failed: {str(e)}")
 
         # Фолбэк: запрашиваем оставшиеся символы параллельно
-        if remaining_symbols:
+        if remaining_symbols - blocked_symbols:
             logger.debug(
                 f"⚙️ Bulk вернул не все данные, догружаем {len(remaining_symbols)} символов параллельно"
             )
@@ -3076,9 +3098,10 @@ class BybitClient:
                     logger.debug(f"🔥 Exception for {symbol}: {str(exc)}")
                     raise
 
-            with ThreadPoolExecutor(max_workers=min(8, len(remaining_symbols))) as executor:
+            fetchable = list(remaining_symbols - blocked_symbols)
+            with ThreadPoolExecutor(max_workers=min(8, len(fetchable))) as executor:
                 future_to_symbol = {
-                    executor.submit(_fetch_symbol, symbol): symbol for symbol in list(remaining_symbols)
+                    executor.submit(_fetch_symbol, symbol): symbol for symbol in fetchable
                 }
 
                 for future in as_completed(future_to_symbol):
@@ -3097,27 +3120,13 @@ class BybitClient:
                     _extract_from_response(response, f'fallback:{symbol}')
 
         if remaining_symbols:
-            required_symbols = set(self.config.SYMBOLS)
-            for triangle in self.config.TRIANGULAR_PAIRS:
-                required_symbols.update(triangle.get('legs', []))
-
-            missing_required = remaining_symbols & required_symbols
             missing_preview = ', '.join(sorted(remaining_symbols))
-            logger.error(
-                "🚫 После bulk и фолбэк-запросов остались отсутствующие тикеры: %s",
+            logger.warning(
+                "🚫 После всех запросов отсутствуют тикеры: %s. Помечаем как временно недоступные.",
                 missing_preview,
             )
-
-            if missing_required:
-                pause_seconds = getattr(self.config, 'UPDATE_INTERVAL', 1)
-                logger.error(
-                    "⏸️ Принудительная пауза цикла на %.2f с для предотвращения работы с неконсистентными данными",
-                    pause_seconds,
-                )
-                time.sleep(pause_seconds)
-                raise RuntimeError(
-                    f"Критичные тикеры недоступны: {', '.join(sorted(missing_required))}"
-                )
+            self._temporarily_unavailable_symbols.update(remaining_symbols)
+            remaining_symbols.clear()
 
         duration = time.time() - start_time
         logger.debug(
@@ -3139,6 +3148,11 @@ class BybitClient:
         self._validate_ticker_freshness(tickers)
 
         return tickers
+
+    def get_unavailable_symbols(self):
+        """Возвращает текущее множество временно исключённых тикеров."""
+
+        return set(self._temporarily_unavailable_symbols)
 
     def add_order_listener(self, callback):
         """Подключает внешний обработчик событий ордеров."""
@@ -5407,6 +5421,14 @@ class AdvancedArbitrageEngine:
         if not tickers:
             logger.warning("❌ No ticker data received")
             return []
+
+        available_symbols = set(tickers)
+        missing_symbols = all_symbols - available_symbols
+        if missing_symbols:
+            logger.warning(
+                "⚠️ Часть тикеров временно недоступна и исключена из оценки: %s",
+                ", ".join(sorted(missing_symbols)),
+            )
 
         # Обновляем рыночные данные
         self.update_market_data(tickers)
