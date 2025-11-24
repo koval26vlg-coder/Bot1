@@ -172,15 +172,15 @@ class AsyncBybitClient:
         except (TypeError, ValueError):
             return 0.0
 
-    def _validate_ticker_freshness(self, tickers: dict) -> None:
-        """Проверяет свежесть котировок и логирует подозрительные элементы."""
+    def _validate_ticker_freshness(self, tickers: dict) -> set[str]:
+        """Проверяет свежесть котировок, логирует и возвращает устаревшие символы."""
 
         if not tickers:
-            return
+            return set()
 
         freshness_limit_ms = int(getattr(self.config, "TICKER_STALENESS_WARNING_SEC", 5.0) * 1000)
         now_ms = int(time.time() * 1000)
-        stale = []
+        stale: list[tuple[str, float]] = []
 
         for symbol, data in tickers.items():
             timestamp = data.get("timestamp")
@@ -202,6 +202,81 @@ class AsyncBybitClient:
                 getattr(self.config, "TICKER_STALENESS_WARNING_SEC", 5.0),
                 preview,
             )
+
+        return {symbol for symbol, _ in stale}
+
+    async def _refresh_stale_tickers(self, stale_symbols: set[str]) -> tuple[dict[str, dict], set[str]]:
+        """Повторно загружает устаревшие котировки через альтернативные источники."""
+
+        if not stale_symbols:
+            return {}, set()
+
+        logger.info(
+            "🔁 Запускаем восстановление для %s устаревших тикеров: %s",
+            len(stale_symbols),
+            ", ".join(sorted(stale_symbols)),
+        )
+
+        refreshed: dict[str, dict] = {}
+        failed = set(stale_symbols)
+        concurrency = max(1, getattr(self.config, "ASYNC_TICKER_CONCURRENCY", 6))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _pull_symbol(symbol: str) -> tuple[str, dict | None]:
+            async with semaphore:
+                params = {"category": self.market_category, "symbol": symbol}
+                return symbol, await self._request_with_backoff(params, f"stale:{symbol}")
+
+        tasks = [asyncio.create_task(_pull_symbol(symbol)) for symbol in stale_symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, Exception):
+                logger.debug("🔥 Исключение восстановления тикера: %s", result)
+                continue
+
+            symbol, response = result
+            extracted = self._extract_from_response(response, {symbol}, f"stale:{symbol}")
+            if extracted:
+                refreshed.update(extracted)
+                failed.discard(symbol)
+
+        if refreshed:
+            logger.info(
+                "✅ Успешно восстановлены устаревшие тикеры: %s",
+                ", ".join(sorted(refreshed)),
+            )
+        if failed:
+            logger.warning(
+                "🚧 Не удалось обновить устаревшие тикеры: %s",
+                ", ".join(sorted(failed)),
+            )
+
+        return refreshed, failed
+
+    async def _finalize_tickers(self, tickers: dict[str, dict]) -> dict[str, dict]:
+        """Фильтрует устаревшие данные, восстанавливает их и обновляет кэш."""
+
+        stale_symbols = self._validate_ticker_freshness(tickers)
+        if stale_symbols:
+            for symbol in stale_symbols:
+                tickers.pop(symbol, None)
+
+            refreshed, failed = await self._refresh_stale_tickers(stale_symbols)
+            if refreshed:
+                tickers.update(refreshed)
+
+            if failed:
+                self._temporarily_unavailable_symbols.update(failed)
+                logger.debug(
+                    "🛑 Помечаем устаревшие тикеры как временно недоступные: %s",
+                    ", ".join(sorted(failed)),
+                )
+
+        if self.ws_manager and tickers:
+            self.ws_manager.update_cache(tickers)
+
+        return tickers
 
     async def get_tickers_async(self, symbols: list[str]) -> dict[str, dict]:
         """Асинхронно получает тикеры, используя кэш WebSocket и параллельные запросы."""
@@ -240,16 +315,14 @@ class AsyncBybitClient:
 
             if not remaining_symbols:
                 logger.debug("♻️ Используем кэш WebSocket для всех тикеров")
-                self._validate_ticker_freshness(tickers)
-                return tickers
+                return await self._finalize_tickers(tickers)
 
         if getattr(self.config, "WEBSOCKET_PRICE_ONLY", False) and remaining_symbols:
             logger.warning(
                 "📡 Включён режим WEBSOCKET_PRICE_ONLY, пропускаем REST для %s тикеров",
                 len(remaining_symbols),
             )
-            self._validate_ticker_freshness(tickers)
-            return tickers
+            return await self._finalize_tickers(tickers)
 
         request_count = 0
         start_time = time.time()
@@ -315,11 +388,7 @@ class AsyncBybitClient:
             duration,
         )
 
-        if self.ws_manager and tickers:
-            self.ws_manager.update_cache(tickers)
-
-        self._validate_ticker_freshness(tickers)
-        return tickers
+        return await self._finalize_tickers(tickers)
 
     def get_unavailable_symbols(self) -> set[str]:
         """Возвращает копию множества временно исключённых тикеров."""
