@@ -136,6 +136,14 @@ class Config:
         self.REPLAY_SPEED = self._load_float_env('REPLAY_SPEED', 1.0)
         self.REPLAY_MAX_RECORDS = self._load_int_env('REPLAY_MAX_RECORDS', 0)
 
+        # Параметры ML-оптимизатора порога прибыли
+        self.ML_MODEL_PATH = os.getenv('ML_MODEL_PATH', 'models/profit_threshold_model.pkl')
+        self.ML_FALLBACK_THRESHOLD = self._load_float_env(
+            'ML_FALLBACK_THRESHOLD',
+            self.MIN_TRIANGULAR_PROFIT,
+        )
+        self.ML_MIN_THRESHOLD = self._load_float_env('ML_MIN_THRESHOLD', 0.0)
+
     @property
     def MARKET_CATEGORY(self):
         """Возвращает тип сегмента рынка с учётом среды и арбитражных тикеров."""
@@ -3928,6 +3936,7 @@ from performance_optimizer import PerformanceOptimizer
 from indicator_strategies import StrategyManager
 # Используем реальный локальный модуль math_stats вместо устаревшего utils.math_stats
 from math_stats import mean, rolling_mean
+from ml_profit_optimizer import MLProfitOptimizer
 
 
 logger = logging.getLogger(__name__)
@@ -4004,6 +4013,11 @@ class AdvancedArbitrageEngine:
             self.performance_optimizer = PerformanceOptimizer(self.config)
         else:
             self.performance_optimizer.update_config(self.config)
+
+        self.ml_profit_optimizer = MLProfitOptimizer(
+            getattr(self.config, 'ML_MODEL_PATH', 'models/profit_threshold_model.pkl'),
+            getattr(self.config, 'ML_FALLBACK_THRESHOLD', getattr(self.config, 'MIN_TRIANGULAR_PROFIT', 0.0)),
+        )
 
         if reset_state:
             self._initialize_data_structures()
@@ -4329,7 +4343,9 @@ class AdvancedArbitrageEngine:
             'best_triangles': [],
             'market_conditions': 'normal',
             'average_spread_percent': 0.0,
-            'orderbook_imbalance': 0.0
+            'orderbook_imbalance': 0.0,
+            'empty_cycles': self.no_opportunity_cycles,
+            'market_regime': 'normal'
         }
         
         volatilities = []
@@ -4351,12 +4367,51 @@ class AdvancedArbitrageEngine:
         elif market_analysis['overall_volatility'] < 0.1:
             market_analysis['market_conditions'] = 'low_volatility'
 
+        market_analysis['empty_cycles'] = self.no_opportunity_cycles
+        market_analysis['market_regime'] = self._determine_market_regime(
+            market_analysis['market_conditions']
+        )
+
         return market_analysis
 
-    def _calc_dynamic_threshold_testnet(self, base_profit_threshold, market_analysis, commission_buffer, slippage_buffer, volatility_buffer):
+    def _determine_market_regime(self, market_conditions: str | None = None) -> str:
+        """Формирует строковое описание режима рынка для ML-контекста."""
+
+        parts = ['testnet' if getattr(self.config, 'TESTNET', False) else 'live']
+        parts.append(getattr(self.config, 'MARKET_CATEGORY', 'spot'))
+
+        if market_conditions:
+            parts.append(market_conditions)
+
+        return '_'.join(parts)
+
+    def _build_threshold_context(self, market_analysis: dict | None) -> dict:
+        """Готовит контекст для ML-оптимизатора порога прибыли."""
+
+        safe_analysis = market_analysis or {}
+        regime = safe_analysis.get('market_regime') or self._determine_market_regime(
+            safe_analysis.get('market_conditions')
+        )
+
+        return {
+            'overall_volatility': safe_analysis.get('overall_volatility', 0.0),
+            'average_spread_percent': safe_analysis.get('average_spread_percent', 0.0),
+            'orderbook_imbalance': safe_analysis.get('orderbook_imbalance', 0.0),
+            'empty_cycles': safe_analysis.get('empty_cycles', self.no_opportunity_cycles),
+            'market_regime': regime,
+        }
+
+    def _calc_dynamic_threshold_testnet(self, base_profit_threshold, market_analysis, commission_buffer, slippage_buffer, volatility_buffer, threshold_context=None):
         """Расчет динамического порога для тестовой среды."""
-        dynamic_profit_threshold = base_profit_threshold
         threshold_adjustments = []
+
+        ml_threshold = None
+        if getattr(self, 'ml_profit_optimizer', None):
+            ml_threshold = self.ml_profit_optimizer.predict_threshold(threshold_context or {})
+            ml_reason = 'ML-прогноз порога (фолбэк)' if not getattr(self.ml_profit_optimizer, 'model', None) else 'ML-прогноз порога'
+            threshold_adjustments.append({'reason': ml_reason, 'value': ml_threshold})
+
+        dynamic_profit_threshold = ml_threshold if ml_threshold is not None else base_profit_threshold
 
         dynamic_profit_threshold += commission_buffer
         threshold_adjustments.append({'reason': 'комиссии цикла', 'value': commission_buffer})
@@ -4393,6 +4448,7 @@ class AdvancedArbitrageEngine:
 
         min_dynamic_floor = max(
             getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
+            getattr(self.config, 'ML_MIN_THRESHOLD', 0.0),
             base_profit_threshold + commission_buffer + slippage_buffer
         )
         if dynamic_profit_threshold < min_dynamic_floor:
@@ -4401,10 +4457,20 @@ class AdvancedArbitrageEngine:
 
         return dynamic_profit_threshold, threshold_adjustments
 
-    def _calc_dynamic_threshold_live(self, base_profit_threshold, market_analysis, commission_buffer, slippage_buffer, volatility_buffer, tickers, strategy_result):
+    def _calc_dynamic_threshold_live(self, base_profit_threshold, market_analysis, commission_buffer, slippage_buffer, volatility_buffer, tickers, strategy_result, threshold_context=None):
         """Расчет динамического порога для боевого режима."""
-        dynamic_profit_threshold = base_profit_threshold
         threshold_adjustments = []
+
+        ml_threshold = None
+        if getattr(self, 'ml_profit_optimizer', None):
+            ml_threshold = self.ml_profit_optimizer.predict_threshold(threshold_context or {})
+            ml_reason = 'ML-прогноз порога (фолбэк)' if not getattr(self.ml_profit_optimizer, 'model', None) else 'ML-прогноз порога'
+            threshold_adjustments.append({
+                'reason': ml_reason,
+                'value': ml_threshold
+            })
+
+        dynamic_profit_threshold = ml_threshold if ml_threshold is not None else base_profit_threshold
 
         dynamic_profit_threshold += commission_buffer
         threshold_adjustments.append({
@@ -4528,6 +4594,7 @@ class AdvancedArbitrageEngine:
 
         min_dynamic_floor = max(
             getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
+            getattr(self.config, 'ML_MIN_THRESHOLD', 0.0),
             base_profit_threshold + commission_buffer + slippage_buffer
         )
         if dynamic_profit_threshold < min_dynamic_floor:
@@ -4674,6 +4741,8 @@ class AdvancedArbitrageEngine:
         self._last_market_analysis = market_analysis
         self._last_candidates = []
 
+        threshold_context = self._build_threshold_context(market_analysis)
+
         # Динамический порог прибыли с отдельной веткой для тестнета
         rejected_candidates = 0
         rejected_by_profit = 0
@@ -4696,7 +4765,8 @@ class AdvancedArbitrageEngine:
                 market_analysis,
                 commission_buffer,
                 slippage_buffer,
-                volatility_buffer
+                volatility_buffer,
+                threshold_context
             )
         else:
             # Динамический порог прибыли в зависимости от внешних факторов (боевой режим)
@@ -4708,7 +4778,8 @@ class AdvancedArbitrageEngine:
                 slippage_buffer,
                 volatility_buffer,
                 tickers,
-                strategy_result
+                strategy_result,
+                threshold_context
             )
 
         dynamic_profit_threshold = max(0.0, dynamic_profit_threshold)
