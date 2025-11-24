@@ -300,7 +300,7 @@ class AsyncBybitClient:
         if self.ws_manager:
             cache_hits, fresh_missing = self.ws_manager.get_cached_tickers(
                 requested_symbols,
-                max_age=getattr(self.config, "_ticker_staleness_warning", 5.0),
+                max_age=getattr(self.config, "TICKER_STALENESS_WARNING_SEC", 5.0),
             )
             tickers.update(cache_hits)
             remaining_symbols = set(fresh_missing)
