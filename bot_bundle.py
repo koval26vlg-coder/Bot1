@@ -2563,11 +2563,18 @@ class Dashboard:
 # ==== Конец visualization.py ====
 
 # ==== Начало bybit_client.py ====
+import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlencode
+
+import aiohttp
 from config import Config
 
 try:
@@ -2858,6 +2865,7 @@ class BybitClient:
         self.ws_manager = None
         self.order_error_metrics = defaultdict(int)
         self._temporarily_unavailable_symbols = set()
+        self._async_http_session: aiohttp.ClientSession | None = None
         self._initialize_websocket_streams()
         logger.info(
             "Bybit client initialized. Testnet: %s, Account type: %s, Market category: %s",
@@ -2910,6 +2918,37 @@ class BybitClient:
 
         self.order_error_metrics[error_type] += 1
 
+    async def _ensure_async_session(self) -> aiohttp.ClientSession:
+        """Создаёт HTTP-сессию aiohttp для приватных запросов."""
+
+        if self._async_http_session is None or self._async_http_session.closed:
+            timeout = aiohttp.ClientTimeout(total=10)
+            self._async_http_session = aiohttp.ClientSession(timeout=timeout)
+        return self._async_http_session
+
+    def _build_signed_headers(self, params: dict[str, str], body: str = "") -> dict[str, str]:
+        """Формирует подпись для приватных запросов Bybit v5."""
+
+        api_key = getattr(self.config, "API_KEY", None)
+        api_secret = getattr(self.config, "API_SECRET", None)
+        if not api_key or not api_secret:
+            logger.warning("Отсутствуют API ключи для подписанного запроса")
+            return {}
+
+        timestamp = str(int(time.time() * 1000))
+        recv_window = "5000"
+        query = urlencode(sorted(params.items()))
+        sign_payload = f"{timestamp}{api_key}{recv_window}{query}{body}".encode()
+        signature = hmac.new(api_secret.encode(), sign_payload, hashlib.sha256).hexdigest()
+
+        return {
+            "X-BAPI-SIGN-TYPE": "2",
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-API-KEY": api_key,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window,
+        }
+
     def _log_attempt_result(self, operation, attempt, max_attempts, success, error_type, message):
         """Единообразное логирование попыток с типами ошибок."""
 
@@ -2936,8 +2975,8 @@ class BybitClient:
         }
         return status in uncertain_statuses
 
-    def _ensure_order_finalized(self, order_id, symbol, initial_status, fallback_payload=None):
-        """Дополнительный опрос/отмена ордера при неоднозначном статусе."""
+    async def _ensure_order_finalized(self, order_id, symbol, initial_status, fallback_payload=None):
+        """Асинхронно уточняет или отменяет ордер с ограничением попыток."""
 
         if not order_id:
             logger.warning("Не удалось уточнить статус: отсутствует orderId для %s", symbol)
@@ -2950,19 +2989,40 @@ class BybitClient:
             initial_status or 'unknown',
         )
 
-        for attempt in range(1, 3):
-            fetched = self.get_order_status(order_id, symbol)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            status_task = self.get_order_status_async(order_id, symbol)
+            cancel_task = self.cancel_order_async(order_id, symbol)
+            fetched, cancel_result = await asyncio.gather(status_task, cancel_task)
+
             if fetched and not self._is_status_uncertain(fetched.get('orderStatus')):
                 return fetched
 
-            cancel_result = self.cancel_order(order_id, symbol)
             if cancel_result:
-                fetched_after_cancel = self.get_order_status(order_id, symbol)
+                fetched_after_cancel = await self.get_order_status_async(order_id, symbol)
                 if fetched_after_cancel:
                     return fetched_after_cancel
-            time.sleep(0.5 * attempt)
+
+            if attempt < max_attempts:
+                await asyncio.sleep(0.5 * attempt)
 
         return fallback_payload
+
+    def _ensure_order_finalized_sync(self, order_id, symbol, initial_status, fallback_payload=None):
+        """Синхронный адаптер для асинхронного уточнения статуса ордера."""
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self._ensure_order_finalized(order_id, symbol, initial_status, fallback_payload=fallback_payload)
+            )
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._ensure_order_finalized(order_id, symbol, initial_status, fallback_payload=fallback_payload),
+            loop,
+        )
+        return future.result()
 
     def _initialize_websocket_streams(self):
         """Настраивает WebSocket для котировок и приватных событий."""
@@ -3466,7 +3526,7 @@ class BybitClient:
                     )
 
                     if self._is_status_uncertain(status):
-                        return self._ensure_order_finalized(order_id, symbol, status, fallback_payload=result)
+                        return self._ensure_order_finalized_sync(order_id, symbol, status, fallback_payload=result)
 
                     return result
 
@@ -3488,7 +3548,7 @@ class BybitClient:
 
             if last_result and last_result.get('result', {}).get('orderId'):
                 uncertain = last_result['result']
-                return self._ensure_order_finalized(
+                return self._ensure_order_finalized_sync(
                     uncertain.get('orderId'),
                     symbol,
                     uncertain.get('orderStatus'),
@@ -3568,6 +3628,55 @@ class BybitClient:
             logger.error(f"Error getting order status: {str(e)}")
             self._record_error_metric("unknown")
             return None
+
+    async def get_order_status_async(self, order_id: str, symbol: str) -> dict | None:
+        """Асинхронно получает статус ордера через REST v5 с ретраями."""
+
+        max_attempts = 3
+        base_delay = 0.5
+        params = {"category": self.market_category, "orderId": order_id, "symbol": symbol}
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                session = await self._ensure_async_session()
+                headers = self._build_signed_headers(params)
+                async with session.get(
+                    f"{self.config.API_BASE_URL}/v5/order/history", params=params, headers=headers
+                ) as response:
+                    payload = await response.json()
+
+                if payload.get("retCode") == 0:
+                    order_list = payload.get("result", {}).get("list") or []
+                    if order_list:
+                        return order_list[0]
+
+                error_type, error_message = self._classify_error(response=payload)
+                self._record_error_metric(error_type)
+                self._log_attempt_result(
+                    "get_order_status_async",
+                    attempt,
+                    max_attempts,
+                    False,
+                    error_type,
+                    error_message or f"Статус не найден для {order_id}",
+                )
+            except aiohttp.ClientError as exc:
+                error_type, error_message = self._classify_error(exception=exc)
+                self._record_error_metric(error_type)
+                self._log_attempt_result(
+                    "get_order_status_async",
+                    attempt,
+                    max_attempts,
+                    False,
+                    error_type,
+                    error_message or str(exc),
+                )
+
+            if attempt < max_attempts:
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+
+        logger.warning("Не удалось получить статус ордера %s после асинхронных повторов", order_id)
+        return None
     
     def cancel_order(self, order_id, symbol):
         """Отмена ордера"""
@@ -3592,6 +3701,58 @@ class BybitClient:
         except Exception as e:
             logger.error(f"Error cancelling order: {str(e)}")
             return False
+
+    async def cancel_order_async(self, order_id: str, symbol: str) -> bool:
+        """Асинхронно отменяет ордер с ретраями и таймаутом."""
+
+        if self.config.TESTNET:
+            logger.info("🧪 TESTNET MODE: Симулируем отмену ордера %s", order_id)
+            return True
+
+        max_attempts = 2
+        base_delay = 0.5
+        payload = {"category": self.market_category, "orderId": order_id, "symbol": symbol}
+        body = json.dumps(payload, separators=(",", ":"))
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                session = await self._ensure_async_session()
+                headers = self._build_signed_headers(payload, body)
+                async with session.post(
+                    f"{self.config.API_BASE_URL}/v5/order/cancel", data=body, headers=headers
+                ) as response:
+                    result = await response.json()
+
+                if result.get("retCode") == 0:
+                    return True
+
+                error_type, error_message = self._classify_error(response=result)
+                self._record_error_metric(error_type)
+                self._log_attempt_result(
+                    "cancel_order_async",
+                    attempt,
+                    max_attempts,
+                    False,
+                    error_type,
+                    error_message or f"Не удалось отменить {order_id}",
+                )
+            except aiohttp.ClientError as exc:
+                error_type, error_message = self._classify_error(exception=exc)
+                self._record_error_metric(error_type)
+                self._log_attempt_result(
+                    "cancel_order_async",
+                    attempt,
+                    max_attempts,
+                    False,
+                    error_type,
+                    error_message or str(exc),
+                )
+
+            if attempt < max_attempts:
+                await asyncio.sleep(base_delay * attempt)
+
+        logger.warning("Не удалось отменить ордер %s после асинхронных попыток", order_id)
+        return False
     
     def get_open_orders(self, symbol=None):
         """Получение открытых ордеров"""
@@ -6683,6 +6844,41 @@ class ContingentOrderOrchestrator:
                 'cumExecQty': event.get('cumExecQty'),
                 'qty': event.get('qty') or event.get('leavesQty'),
             }
+
+        if hasattr(self.client, '_is_status_uncertain') and hasattr(self.client, '_ensure_order_finalized'):
+            status = event.get('orderStatus')
+            symbol = event.get('symbol')
+            if self.client._is_status_uncertain(status):
+                self._fire_and_forget(
+                    self._refresh_order_status_async(order_id, symbol, status, fallback_payload=event)
+                )
+
+    async def _refresh_order_status_async(self, order_id: str, symbol: str, status: str | None, fallback_payload: dict):
+        """Асинхронно обновляет сведения по ордеру и записывает финальный статус."""
+
+        finalized = await self.client._ensure_order_finalized(
+            order_id,
+            symbol,
+            status,
+            fallback_payload=fallback_payload,
+        )
+
+        if finalized:
+            with self._order_events_lock:
+                self._order_events[order_id] = {
+                    'status': finalized.get('orderStatus'),
+                    'cumExecQty': finalized.get('cumExecQty'),
+                    'qty': finalized.get('qty'),
+                }
+
+    def _fire_and_forget(self, coro):
+        """Запускает корутину без блокировки основного цикла."""
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+        except RuntimeError:
+            threading.Thread(target=asyncio.run, args=(coro,), daemon=True).start()
 
     def _get_ws_order_status(self, order_id: str) -> tuple[str | None, float | None]:
         """Возвращает статус и долю исполнения из WebSocket, если доступно."""
