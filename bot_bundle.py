@@ -17,6 +17,7 @@ for _alias in [
     'monitoring',
     'visualization',
     'bybit_client',
+    'okx_client',
     'advanced_arbitrage_engine',
     'advanced_bot',
     'real_trading',
@@ -40,6 +41,7 @@ class Config:
     API_KEY = os.getenv('BYBIT_API_KEY')
     API_SECRET = os.getenv('BYBIT_API_SECRET')
     TESTNET = os.getenv('TESTNET', 'True').lower() == 'true'
+    PRIMARY_EXCHANGE = os.getenv('PRIMARY_EXCHANGE', 'bybit').lower()
     STRATEGY_MODE = os.getenv('STRATEGY_MODE', 'auto')
     MANUAL_STRATEGY_NAME = os.getenv('MANUAL_STRATEGY_NAME') or ''
 
@@ -76,6 +78,7 @@ class Config:
         self._available_symbols_cache = None
         self._available_cross_map_cache = None
         self._symbol_watchlist_cache = None
+        self._okx_symbol_map = {}
         self._symbol_details_map = {}
         self._market_category_override = os.getenv('MARKET_CATEGORY_OVERRIDE')
         self._auto_detect_market_category = os.getenv('AUTO_DETECT_MARKET_CATEGORY', 'true').lower() == 'true'
@@ -155,6 +158,9 @@ class Config:
     @property
     def API_BASE_URL(self):
         """Базовый URL публичного API Bybit с учётом выбранного сегмента рынка."""
+
+        if self.PRIMARY_EXCHANGE == 'okx':
+            return 'https://www.okx.com'
 
         if self.TESTNET:
             if self.MARKET_CATEGORY == 'spot':
@@ -693,6 +699,9 @@ class Config:
         if self._available_symbols_cache is not None:
             return self._available_symbols_cache
 
+        if self.PRIMARY_EXCHANGE == 'okx':
+            return self._fetch_okx_market_symbols()
+
         url = f"{self.API_BASE_URL}/v5/market/instruments-info"
         params = {'category': self.MARKET_CATEGORY}
 
@@ -753,6 +762,63 @@ class Config:
         self._available_symbols_cache = []
         return self._available_symbols_cache
 
+    def _fetch_okx_market_symbols(self):
+        """Получает список инструментов OKX и сопоставляет формат тикеров."""
+        try:
+            instruments_resp = requests.get(
+                f"{self.API_BASE_URL}/api/v5/public/instruments",
+                params={'instType': 'SPOT'},
+                timeout=10,
+            )
+            instruments_resp.raise_for_status()
+            instruments_data = instruments_resp.json()
+            instruments = instruments_data.get('data', []) or []
+
+            tickers_resp = requests.get(
+                f"{self.API_BASE_URL}/api/v5/market/tickers",
+                params={'instType': 'SPOT'},
+                timeout=10,
+            )
+            tickers_resp.raise_for_status()
+            tickers_data = tickers_resp.json()
+            volumes = {item.get('instId'): float(item.get('volCcy24h', 0) or 0) for item in tickers_data.get('data', [])}
+
+            ranked = []
+            for item in instruments:
+                inst_id = item.get('instId')
+                base_coin = (item.get('baseCcy') or '').upper()
+                quote_coin = (item.get('quoteCcy') or '').upper()
+                state = item.get('state')
+
+                if not inst_id or state not in {'live', 'trading'}:
+                    continue
+
+                normalized_symbol = inst_id.replace('-', '').upper()
+                self._okx_symbol_map[normalized_symbol] = inst_id
+                if base_coin and quote_coin:
+                    self._symbol_details_map[normalized_symbol] = (base_coin, quote_coin)
+
+                ranked.append((normalized_symbol, volumes.get(inst_id, 0.0)))
+
+            ranked.sort(key=lambda pair: pair[1], reverse=True)
+            limit = self._market_symbols_limit if self._market_symbols_limit > 0 else None
+            selected = ranked if limit is None else ranked[:limit]
+
+            self._available_symbols_cache = [symbol for symbol, _ in selected]
+
+            logger.info(
+                "Получено %s тикеров с OKX (ограничение %s)",
+                len(self._available_symbols_cache),
+                limit if limit is not None else 'без ограничений',
+            )
+            return self._available_symbols_cache
+
+        except requests.RequestException as exc:
+            logger.warning("Не удалось получить инструменты OKX: %s", exc)
+
+        self._available_symbols_cache = []
+        return self._available_symbols_cache
+
     def _build_available_cross_map(self):
         """Формирует карту доступных кроссов BASE -> QUOTE"""
         if self._available_cross_map_cache is not None:
@@ -805,6 +871,15 @@ class Config:
             return base_coin, quote_coin
 
         return None, None
+
+    def get_okx_inst_id(self, symbol: str):
+        """Возвращает instId для тикера OKX при необходимости."""
+
+        if not symbol:
+            return None
+
+        normalized = symbol.replace('-', '').upper()
+        return self._okx_symbol_map.get(normalized)
 
 # ==== Конец config.py ====
 
@@ -3532,6 +3607,142 @@ class BybitClient:
             return []
 # ==== Конец bybit_client.py ====
 
+# ==== Начало okx_client.py ====
+class OkxClient:
+    def __init__(self, config: Config | None = None):
+        self.config = config or Config()
+        self.session = requests.Session()
+        self.base_url = getattr(self.config, 'API_BASE_URL', 'https://www.okx.com')
+        self.market_category = 'spot'
+        self._temporarily_unavailable_symbols = set()
+
+        # Убеждаемся, что маппинг instId заполнен
+        try:
+            _ = self.config.SYMBOLS
+        except Exception:
+            logger.debug("Не удалось предзагрузить список тикеров OKX")
+
+        logger.info("OKX client initialized. Base URL: %s", self.base_url)
+
+    def _safe_float(self, value, default=0.0):
+        """Безопасно приводит значение к float, возвращает default при ошибке."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _inst_id(self, symbol):
+        """Преобразует тикер без дефиса в instId OKX."""
+        if not symbol:
+            return None
+
+        explicit = self.config.get_okx_inst_id(symbol)
+        if explicit:
+            return explicit
+
+        normalized = symbol.replace('-', '').upper()
+        if len(normalized) < 3:
+            return None
+
+        base, quote = normalized[:-4], normalized[-4:]
+        return f"{base}-{quote}"
+
+    def add_order_listener(self, callback):
+        """Поддержка WebSocket не реализована, метод оставлен для совместимости."""
+
+        logger.debug("Слушатели ордеров для OKX не поддерживаются")
+
+    def get_tickers(self, symbols):
+        """Возвращает котировки OKX, фильтруя по нужным тикерам."""
+
+        requested = {sym.replace('-', '').upper() for sym in symbols}
+        tickers = {}
+
+        if not requested:
+            return tickers
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/v5/market/tickers",
+                params={'instType': 'SPOT'},
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            for item in payload.get('data', []) or []:
+                inst_id = item.get('instId')
+                normalized = (inst_id or '').replace('-', '').upper()
+                if normalized not in requested:
+                    continue
+
+                tickers[normalized] = {
+                    'bid': self._safe_float(item.get('bidPx')),
+                    'ask': self._safe_float(item.get('askPx')),
+                    'last': self._safe_float(item.get('last')),
+                    'timestamp': item.get('ts')
+                }
+
+            missing = requested - set(tickers)
+            if missing:
+                logger.warning(
+                    "⚠️ OKX не вернул тикеры: %s", ', '.join(sorted(missing))
+                )
+            return tickers
+        except requests.RequestException as exc:
+            logger.warning("Не удалось получить котировки OKX: %s", exc)
+            return tickers
+
+    def get_order_book(self, symbol, depth=5):
+        """Запрашивает стакан для тикера OKX."""
+
+        inst_id = self._inst_id(symbol)
+        if not inst_id:
+            logger.warning("Не удалось построить instId для %s", symbol)
+            return {}
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/v5/market/books",
+                params={'instId': inst_id, 'sz': depth},
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            entries = (data.get('data') or [{}])[0]
+            return {
+                'bids': entries.get('bids') or [],
+                'asks': entries.get('asks') or [],
+            }
+        except requests.RequestException as exc:
+            logger.warning("Ошибка получения стакана OKX для %s: %s", inst_id, exc)
+            return {}
+
+    def place_order(self, **params):
+        """Заглушка размещения ордеров для OKX."""
+
+        logger.error("Размещение ордеров на OKX не реализовано в текущем профиле")
+        return {'orderId': None, 'orderStatus': 'failed', 'instType': 'SPOT'}
+
+    def cancel_order(self, order_id, symbol):
+        """Заглушка отмены ордеров."""
+
+        logger.warning("Отмена ордеров на OKX не поддерживается: %s", order_id)
+        return None
+
+    def get_order_status(self, order_id, symbol=None):
+        """Заглушка статуса ордера."""
+
+        logger.warning("Запрос статуса ордера на OKX не реализован: %s", order_id)
+        return None
+
+    def get_balance(self, coin='USDT'):
+        """Возвращает пустой баланс для совместимости, чтобы не падать в режиме OKX."""
+
+        logger.warning("Баланс OKX не поддерживается, возвращаем нулевой")
+        return {'coin': coin, 'available': 0.0, 'total': 0.0}
+
+# ==== Конец okx_client.py ====
+
 # ==== Начало advanced_arbitrage_engine.py ====
 import csv
 import inspect
@@ -3543,6 +3754,7 @@ from itertools import permutations
 from pathlib import Path
 
 from bybit_client import BybitClient
+from okx_client import OkxClient
 from config import Config
 from monitoring import AdvancedMonitor
 from performance_optimizer import PerformanceOptimizer
@@ -3561,9 +3773,9 @@ class AdvancedArbitrageEngine:
 
         base_config = config or Config()
 
-        self.client = BybitClient(config=base_config)
+        self.client = self._create_client(base_config)
         self.monitor = AdvancedMonitor(self)
-        self.real_trader = RealTradingExecutor()
+        self.real_trader = RealTradingExecutor(base_config)
         self.strategy_manager = None
         self.performance_optimizer = None
 
@@ -3571,6 +3783,14 @@ class AdvancedArbitrageEngine:
 
         self.monitor.start_monitoring_loop()
         logger.info("🚀 Advanced Triangular Arbitrage Engine initialized")
+
+    def _create_client(self, cfg: Config):
+        """Выбирает клиент биржи согласно конфигурации."""
+
+        exchange = getattr(cfg, 'PRIMARY_EXCHANGE', 'bybit').lower()
+        if exchange == 'okx':
+            return OkxClient(config=cfg)
+        return BybitClient(config=cfg)
 
     def _apply_config(self, new_config, *, reset_state=True, recreate_client=True):
         """Подменяет конфигурацию и пересобирает связанные структуры."""
@@ -3582,7 +3802,7 @@ class AdvancedArbitrageEngine:
         self.config = new_config
 
         if recreate_client:
-            self.client = BybitClient(config=new_config)
+            self.client = self._create_client(new_config)
 
         self.cooldown_period = getattr(self.config, 'COOLDOWN_PERIOD', None) or 180
 
@@ -3849,6 +4069,11 @@ class AdvancedArbitrageEngine:
         if volatility_buffer:
             dynamic_profit_threshold += volatility_buffer
             threshold_adjustments.append({'reason': 'реальная волатильность', 'value': volatility_buffer})
+
+        upper_cap = max(base_profit_threshold + 0.1, getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0))
+        if dynamic_profit_threshold > upper_cap:
+            threshold_adjustments.append({'reason': 'ограничение тестнета', 'value': upper_cap - dynamic_profit_threshold})
+            dynamic_profit_threshold = upper_cap
 
         min_dynamic_floor = max(
             getattr(self.config, 'MIN_DYNAMIC_PROFIT_FLOOR', 0.0),
@@ -4896,13 +5121,27 @@ class AdvancedArbitrageEngine:
         max_impact = getattr(self.config, 'MAX_ORDERBOOK_IMPACT', 0.25)
         planned_amount = getattr(self.config, 'TRADE_AMOUNT', 0) or self.config.MIN_LIQUIDITY
 
+        min_liquidity = getattr(self.config, 'MIN_LIQUIDITY', 0)
+        if getattr(self.config, 'TESTNET', False) or getattr(self.config, 'PRIMARY_EXCHANGE', 'bybit') == 'okx':
+            min_liquidity = max(50.0, min_liquidity * 0.2)
+
         # Проверяем глубокую ликвидность по каждому плечу
         def _depth_value(levels):
             # Суммируем денежный объём верхних уровней стакана
-            return sum(
-                max(0.0, level.get('price', 0)) * max(0.0, level.get('size', 0))
-                for level in levels[:depth_levels]
-            )
+            total = 0.0
+            for level in levels[:depth_levels]:
+                if isinstance(level, dict):
+                    price = self._safe_float(level.get('price'))
+                    size = self._safe_float(level.get('size'))
+                elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                    price = self._safe_float(level[0])
+                    size = self._safe_float(level[1])
+                else:
+                    continue
+
+                total += max(0.0, price) * max(0.0, size)
+
+            return total
 
         for symbol in triangle['legs']:
             if symbol not in tickers:
@@ -4940,12 +5179,12 @@ class AdvancedArbitrageEngine:
             total_ask_value = _depth_value(order_book.get('asks', []))
             available_liquidity = min(total_bid_value, total_ask_value)
 
-            if available_liquidity < self.config.MIN_LIQUIDITY:
+            if available_liquidity < min_liquidity:
                 logger.debug(
                     "Недостаточная ликвидность в стакане %s: доступно %.2f USDT (порог %.2f)",
                     symbol,
                     available_liquidity,
-                    self.config.MIN_LIQUIDITY
+                    min_liquidity
                 )
                 return False
 
@@ -6107,6 +6346,7 @@ from datetime import datetime
 import os  # Исправлено: добавлен импорт os
 from config import Config  # Исправлено: проверьте правильность пути импорта
 from bybit_client import BybitClient  # Исправлено: проверьте правильность пути импорта
+from okx_client import OkxClient
 
 logger = logging.getLogger(__name__)
 
@@ -6580,9 +6820,9 @@ class ContingentOrderOrchestrator:
 class RealTradingExecutor:
     """Исполнение реальных ордеров с режимом симуляции и постепенного перехода к реальной торговле"""
     
-    def __init__(self):
-        self.config = Config()
-        self.client = BybitClient()
+    def __init__(self, config: Config | None = None):
+        self.config = config or Config()
+        self.client = self._select_client()
         self.is_real_mode = False
         self.trade_history = []
         self.risk_manager = RiskManager()
@@ -6621,7 +6861,8 @@ class RealTradingExecutor:
         if self.paper_trading_mode:
             logger.info("📄 Paper trading активирован: используется эмуляция стакана и безрисковое исполнение")
         logger.info(
-            "📡 Режим котировок Bybit: %s",
+            "📡 Режим котировок %s: %s",
+            self.config.PRIMARY_EXCHANGE.upper(),
             'testnet' if self.config.TESTNET else 'mainnet'
         )
 
@@ -6650,6 +6891,14 @@ class RealTradingExecutor:
                 logger.warning("❌ Отмена перехода в реальный режим")
                 return False
         return False
+
+    def _select_client(self):
+        """Выбирает биржевой клиент в зависимости от конфигурации."""
+
+        exchange = getattr(self.config, 'PRIMARY_EXCHANGE', 'bybit').lower()
+        if exchange == 'okx':
+            return OkxClient(config=self.config)
+        return BybitClient(config=self.config)
     
     def _request_real_mode_confirmation(self):
         """Запрос подтверждения перед переходом в реальный режим"""
