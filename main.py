@@ -7,19 +7,23 @@ import time
 
 import bot_bundle
 from bot_bundle import AdvancedArbitrageEngine, HistoricalReplayer, OptimizedConfig
+from logging_utils import configure_root_logging, create_adapter, generate_cycle_id
 
 
 # Функция advanced_main получает функцию main из advanced_bot внутри монолитного bot_bundle
 advanced_main = bot_bundle.main
 
 
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+def _configure_logging(level: str, mode: str, environment: str):
+    """Создает адаптер логирования с дополнительными полями контекста."""
 
-
-def _configure_logging(level: str) -> None:
-    """Настраивает базовое логирование с указанным уровнем."""
-
-    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO), format=LOG_FORMAT)
+    configure_root_logging(level, mode=mode, environment=environment)
+    return create_adapter(
+        logging.getLogger(__name__),
+        mode=mode,
+        environment=environment,
+        cycle_id=generate_cycle_id(),
+    )
 
 
 def _apply_threshold_overrides(min_profit: float | None, trade_amount: float | None) -> None:
@@ -44,7 +48,11 @@ def _prepare_aggressive_env(min_profit: float | None, trade_amount: float | None
     os.environ.setdefault("TRADE_AMOUNT", str(effective_trade_amount))
 
 
-def _prepare_quick_config(min_profit: float | None, trade_amount: float | None) -> OptimizedConfig:
+def _prepare_quick_config(
+    min_profit: float | None,
+    trade_amount: float | None,
+    logger,
+) -> OptimizedConfig:
     """Создает конфигурацию для быстрого тестового цикла."""
 
     os.environ["TESTNET"] = "true"
@@ -56,84 +64,109 @@ def _prepare_quick_config(min_profit: float | None, trade_amount: float | None) 
     if trade_amount is not None:
         optimized._TRADE_AMOUNT = trade_amount
 
-    logging.info("Используется OptimizedConfig в режиме тестнета")
+    logger.info("Используется OptimizedConfig в режиме тестнета")
 
     if trade_amount is not None:
-        logging.info(
+        logger.info(
             "Применён пользовательский объём сделки для режима quick: %s USDT",
             optimized.TRADE_AMOUNT,
         )
     else:
-        logging.info(
+        logger.info(
             "Используется стандартный объём сделки для режима quick: %s USDT",
             optimized.TRADE_AMOUNT,
         )
     return optimized
 
 
-def _quick_test(engine) -> None:
+def _quick_test(engine, logger) -> None:
     """Выполняет три цикла поиска возможностей с выводом результатов."""
 
     for cycle in range(1, 4):
+        logger.extra["cycle_id"] = generate_cycle_id()
         start_time = time.time()
         opportunities = engine.detect_opportunities()
         duration = time.time() - start_time
 
         if opportunities:
-            logging.info("Цикл %s: найдено возможностей %s", cycle, len(opportunities))
-            logging.info("Список возможностей: %s", opportunities)
+            logger.info("Цикл %s: найдено возможностей %s", cycle, len(opportunities))
+            logger.info("Список возможностей: %s", opportunities)
         else:
-            logging.info("Цикл %s: возможности не найдены", cycle)
+            logger.info("Цикл %s: возможности не найдены", cycle)
 
-        logging.info("Время цикла %s: %.2f секунд", cycle, duration)
+        logger.info("Время цикла %s: %.2f секунд", cycle, duration)
         if duration > 30:
-            logging.warning(
+            logger.warning(
                 "Цикл %s превысил 30 секунд и может требовать оптимизации", cycle
             )
+
+
+def _resolve_environment() -> str:
+    """Определяет окружение для логирования."""
+
+    simulation_mode = os.getenv("SIMULATION_MODE", "false").lower() == "true"
+    if simulation_mode:
+        return "simulation"
+
+    testnet_enabled = os.getenv("TESTNET", "false").lower() == "true"
+    if testnet_enabled:
+        return "testnet"
+
+    return os.getenv("ENVIRONMENT", "production")
 
 
 def _run_standard_mode(args) -> None:
     """Стандартный запуск улучшенного бота."""
 
-    _configure_logging(args.log_level)
     _apply_threshold_overrides(args.min_profit, args.trade_amount)
+    environment = _resolve_environment()
+    logger = _configure_logging(args.log_level, args.mode, environment)
 
-    advanced_main()
+    advanced_main(logger_adapter=logger, mode=args.mode, environment=environment)
 
 
 def _run_aggressive_mode(args) -> None:
     """Запуск с агрессивными настройками и предустановленными переменными окружения."""
 
-    _configure_logging(args.log_level)
     _prepare_aggressive_env(args.min_profit, args.trade_amount)
+    environment = _resolve_environment()
+    logger = _configure_logging(args.log_level, args.mode, environment)
 
-    advanced_main()
+    advanced_main(logger_adapter=logger, mode=args.mode, environment=environment)
 
 
 def _run_quick_mode(args) -> None:
     """Быстрый тестовый прогон арбитражного движка с оптимизированной конфигурацией."""
 
-    _configure_logging(args.log_level)
-    optimized_config = _prepare_quick_config(args.min_profit, args.trade_amount)
+    os.environ.setdefault("TESTNET", "true")
+    environment = _resolve_environment()
+    logger = _configure_logging(args.log_level, args.mode, environment)
+    optimized_config = _prepare_quick_config(
+        args.min_profit,
+        args.trade_amount,
+        logger,
+    )
 
     engine = AdvancedArbitrageEngine(config=optimized_config)
 
-    logging.info("Запуск тестового цикла обнаружения возможностей")
-    _quick_test(engine)
+    logger.info("Запуск тестового цикла обнаружения возможностей")
+    _quick_test(engine, logger)
 
 
 def _run_replay_mode(args) -> None:
     """Стресс-тест движка на исторических данных (режим replay)."""
 
-    _configure_logging(args.log_level)
     os.environ.setdefault("SIMULATION_MODE", "true")
     os.environ.setdefault("PAPER_TRADING_MODE", "true")
+
+    environment = _resolve_environment()
+    logger = _configure_logging(args.log_level, args.mode, environment)
 
     engine = AdvancedArbitrageEngine()
     data_path = args.replay_path or getattr(engine.config, "REPLAY_DATA_PATH", None)
 
     if not data_path:
-        logging.error(
+        logger.error(
             "Для режима replay требуется указать путь к файлу через --replay-path или переменную REPLAY_DATA_PATH"
         )
         return
