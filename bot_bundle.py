@@ -6675,8 +6675,8 @@ logger = logging.getLogger(__name__)
 
 class RiskManager:
     """Менеджер рисков для реальной торговли"""
-    
-    def __init__(self):
+
+    def __init__(self, client: BybitClient | OkxClient | None = None):
         self.max_daily_loss = 5.0  # Максимальный убыток в день в USDT
         self.max_trade_size_percent = 10  # Максимальный размер сделки в процентах от баланса
         self.max_consecutive_losses = 3  # Максимальное количество убыточных сделок подряд
@@ -6689,6 +6689,9 @@ class RiskManager:
         self.capital_risk_fraction = 0.05  # Максимальная доля капитала под риск на сделку
         self.returns_history = deque(maxlen=500)  # История доходностей для расчёта волатильности
         self.last_portfolio_value = None
+        self.trading_blocked_until: datetime | None = None
+        self.client = client
+        self.last_reset_date = datetime.now().date()
 
     def calculate_var(self, portfolio_value: float, time_horizon: int = 1) -> float:
         """Оценивает VaR на основе истории доходностей."""
@@ -6708,11 +6711,110 @@ class RiskManager:
         horizon_scale = math.sqrt(max(time_horizon, 1))
         return portfolio_value * volatility * z_score * horizon_scale
 
+    def _reset_daily_counters_if_needed(self, current_time: datetime):
+        """Сбрасывает дневные лимиты и блокировки при смене суток."""
+
+        if self.last_reset_date and current_time.date() > self.last_reset_date:
+            self.daily_loss = 0.0
+            self.consecutive_losses = 0
+            self.trading_blocked_until = None
+            self.last_reset_date = current_time.date()
+            logger.info("🔄 Сброшены дневные лимиты и блокировки по смене суток")
+
+    def _calculate_end_of_day(self, current_time: datetime) -> datetime:
+        """Возвращает временную метку конца текущих суток."""
+
+        next_day = current_time.date() + timedelta(days=1)
+        return datetime.combine(next_day, datetime.min.time())
+
+    def _activate_block(self, reason: str, current_time: datetime):
+        """Устанавливает блокировку торгов до конца суток с логированием причины."""
+
+        end_of_day = self._calculate_end_of_day(current_time)
+        self.trading_blocked_until = end_of_day
+        logger.critical(
+            "🚫 Блокировка торгов до %s из-за превышения лимита: %s",
+            end_of_day.strftime("%Y-%m-%d %H:%M:%S"),
+            reason,
+        )
+
+    def _resolve_portfolio_value(self, trade_plan, explicit_value: float | None):
+        """Пытается определить актуальную стоимость портфеля."""
+
+        for candidate in [explicit_value, trade_plan.get('portfolio_value'), self.last_portfolio_value]:
+            if candidate is not None and candidate > 0:
+                return float(candidate)
+
+        if self.client:
+            try:
+                balance = self.client.get_balance('USDT')
+                balance_value = balance.get('total') or balance.get('available')
+                if balance_value:
+                    return float(balance_value)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("⚠️ Не удалось получить баланс для расчёта лимита сделки: %s", exc)
+
+        return None
+
+    def _extract_trade_notional(self, trade_plan) -> float:
+        """Извлекает или оценивает объём сделки в USDT."""
+
+        numeric_keys = [
+            'trade_amount',
+            'amount_usdt',
+            'notional',
+            'notional_usdt',
+            'order_amount',
+            'trade_value',
+            'estimated_trade_value',
+        ]
+
+        for key in numeric_keys:
+            value = trade_plan.get(key)
+            if value is not None:
+                try:
+                    numeric_value = float(value)
+                    if numeric_value > 0:
+                        return numeric_value
+                except (TypeError, ValueError):
+                    continue
+
+        # Пытаемся вычислить нотионал по шагам сделки
+        for key, payload in trade_plan.items():
+            if isinstance(payload, dict):
+                amount = payload.get('amount') or payload.get('qty')
+                price = payload.get('price')
+                try:
+                    if amount is not None and price is not None:
+                        notional = float(amount) * float(price)
+                        if notional > 0:
+                            return notional
+                except (TypeError, ValueError):
+                    continue
+
+        return 0.0
+
     def can_execute_trade(self, trade_plan, portfolio_value: float | None = None):
         """Проверка возможности выполнения сделки"""
         current_time = datetime.now()
 
-        portfolio_value = portfolio_value or trade_plan.get('portfolio_value') or self.last_portfolio_value
+        self._reset_daily_counters_if_needed(current_time)
+
+        if self.trading_blocked_until and current_time < self.trading_blocked_until:
+            logger.error(
+                "🚫 Торговля заблокирована до %s", self.trading_blocked_until.strftime("%Y-%m-%d %H:%M:%S")
+            )
+            return False
+
+        if self.daily_loss >= self.max_daily_loss:
+            self._activate_block("превышен дневной убыток", current_time)
+            return False
+
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            self._activate_block("серия убыточных сделок", current_time)
+            return False
+
+        portfolio_value = self._resolve_portfolio_value(trade_plan, portfolio_value)
         var_value = self.calculate_var(portfolio_value, time_horizon=1) if portfolio_value else 0.0
 
         planned_loss = abs(trade_plan.get('max_loss_usdt') or trade_plan.get('estimated_loss_usdt') or trade_plan.get('estimated_profit_usdt', 0))
@@ -6735,17 +6837,30 @@ class RiskManager:
             )
             return False
 
+        # Проверка максимального размера сделки относительно баланса
+        trade_notional = self._extract_trade_notional(trade_plan)
+        if portfolio_value and trade_notional > 0:
+            allowed_notional = portfolio_value * (self.max_trade_size_percent / 100)
+            if trade_notional > allowed_notional:
+                logger.warning(
+                    "🚫 Объём сделки %.4f USDT превышает разрешённый предел %.4f USDT (%.1f%% от баланса)",
+                    trade_notional,
+                    allowed_notional,
+                    self.max_trade_size_percent,
+                )
+                return False
+
         # Проверка интервала между сделками
         if self.last_trade_time and (current_time - self.last_trade_time).total_seconds() < self.min_trade_interval:
             logger.warning(f"⏳ Слишком частые сделки. Ожидайте {(current_time - self.last_trade_time).total_seconds():.0f} секунд")
             return False
-        
-        # Проверка максимального размера сделки
+
+        # Проверка минимальной ожидаемой прибыли
         estimated_profit = trade_plan.get('estimated_profit_usdt', 0)
         if estimated_profit < 0.01:  # Минимальная прибыль 0.01 USDT
             logger.warning(f"📉 Слишком маленькая прибыль: {estimated_profit:.4f} USDT")
             return False
-        
+
         return True
     
     def update_after_trade(self, trade_record):
@@ -6763,14 +6878,16 @@ class RiskManager:
             self.consecutive_losses += 1
         else:
             self.consecutive_losses = 0
-        
+
         self.last_trade_time = datetime.now()
-        
+
         # Проверка лимитов
-        if self.daily_loss > self.max_daily_loss:
+        if self.daily_loss >= self.max_daily_loss:
+            self._activate_block("превышен дневной убыток", self.last_trade_time)
             logger.critical(f"🔥 Достигнут максимальный дневной убыток: {self.daily_loss:.2f} USDT")
-        
-        if self.consecutive_losses > self.max_consecutive_losses:
+
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            self._activate_block("серия убыточных сделок", self.last_trade_time)
             logger.critical(f"🔥 Достигнуто максимальное количество убыточных сделок подряд: {self.consecutive_losses}")
 
 
@@ -7235,7 +7352,7 @@ class RealTradingExecutor:
         self.client = self._select_client()
         self.is_real_mode = False
         self.trade_history = []
-        self.risk_manager = RiskManager()
+        self.risk_manager = RiskManager(client=self.client)
         self.contingent_orchestrator = ContingentOrderOrchestrator(self.client, self.config)
         # Фиктивный баланс для симуляции, чтобы можно было управлять проверками ликвидности
         self._simulated_balance_usdt = self._load_simulated_balance()
