@@ -6332,8 +6332,6 @@ class HistoricalReplayer:
         logger.info("✅ Стресс-тест завершён, обработано %s записей", processed)
         return True
 
-if __name__ == "__main__":
-    main()
 # ==== Конец advanced_bot.py ====
 
 # ==== Начало real_trading.py ====
@@ -7679,4 +7677,7 @@ class RealTradingExecutor:
             logger.error(f"❌ Error exporting trade history: {str(e)}")
             return None
 # ==== Конец real_trading.py ====
+
+if __name__ == "__main__":
+    main()
 
