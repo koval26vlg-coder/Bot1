@@ -30,6 +30,13 @@ import os
 
 import requests
 from dotenv import load_dotenv
+from logging_utils import (
+    LOG_FORMAT,
+    ContextFilter,
+    configure_root_logging,
+    create_adapter,
+    generate_cycle_id,
+)
 
 load_dotenv()
 
@@ -6358,26 +6365,27 @@ def ensure_psutil_available():
         print(message, file=sys.stderr)
         sys.exit(1)
 
-def setup_logging():
-    """Настройка расширенного логгирования"""
-    logger = logging.getLogger()
-    logger.setLevel(getattr(logging, OptimizedConfig().LOG_LEVEL, 'INFO'))
-    
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
-    )
-    
-    # Файловый обработчик
-    file_handler = logging.FileHandler(OptimizedConfig().LOG_FILE)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    
-    # Консольный обработчик с цветами
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+def setup_logging(mode: str, environment: str, *, cycle_id: str | None = None):
+    """Настройка расширенного логирования с контекстом."""
 
-    return logger
+    log_level = getattr(logging, OptimizedConfig().LOG_LEVEL.upper(), logging.INFO)
+    file_handler = logging.FileHandler(OptimizedConfig().LOG_FILE)
+    console_handler = logging.StreamHandler()
+    handlers = [file_handler, console_handler]
+
+    configure_root_logging(
+        logging.getLevelName(log_level),
+        mode=mode,
+        environment=environment,
+        handlers=handlers,
+    )
+
+    return create_adapter(
+        logging.getLogger(__name__),
+        mode=mode,
+        environment=environment,
+        cycle_id=cycle_id,
+    )
 
 
 def log_market_snapshot(engine, max_symbols=None):
@@ -6427,12 +6435,31 @@ class GracefulKiller:
     def exit_gracefully(self, signum, frame):
         self.kill_now = True
 
-def main():
-    """Основная функция запуска улучшенного бота"""
+def main(logger_adapter=None, *, mode: str = "standard", environment: str | None = None):
+    """Основная функция запуска улучшенного бота с контекстным логированием."""
+
     global logger
-    logger = setup_logging()
-    # Используем оптимизированные параметры и явно включаем тестнет для безопасных прогонов
+
     config = OptimizedConfig()
+    effective_environment = environment or (
+        "simulation"
+        if os.getenv("SIMULATION_MODE", "false").lower() == "true"
+        else "testnet"
+        if config.TESTNET
+        else "production"
+    )
+    cycle_id = generate_cycle_id()
+
+    if logger_adapter is not None:
+        logger = logger_adapter
+        logger.extra.update({
+            "mode": mode,
+            "environment": effective_environment,
+            "cycle_id": cycle_id,
+        })
+    else:
+        logger = setup_logging(mode, effective_environment, cycle_id=cycle_id)
+
     config.TESTNET = True  # Принудительный перевод в тестнет
 
     logger.info("=" * 70)
@@ -6465,8 +6492,9 @@ def main():
         iteration_count = 0
         start_time = datetime.now()
         total_opportunities_found = 0
-        
+
         while not killer.kill_now:
+            logger.extra["cycle_id"] = generate_cycle_id()
             iteration_count += 1
             cycle_start = time.time()
             
