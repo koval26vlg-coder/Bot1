@@ -5848,6 +5848,7 @@ class AdvancedArbitrageEngine:
             'total_profit': -abs(trade_plan.get('estimated_profit_usdt', 0) or 0.01),
             'status': 'timeout',
             'simulated': getattr(self.real_trader, 'simulation_mode', True),
+            'portfolio_value': trade_plan.get('portfolio_value'),
         }
 
         if hasattr(self.real_trader, 'trade_history'):
@@ -6661,8 +6662,10 @@ import logging
 import time
 import threading
 import random
+import math
 from collections import deque
 from datetime import datetime
+from statistics import NormalDist, pstdev
 import os  # Исправлено: добавлен импорт os
 from config import Config  # Исправлено: проверьте правильность пути импорта
 from bybit_client import BybitClient  # Исправлено: проверьте правильность пути импорта
@@ -6681,11 +6684,57 @@ class RiskManager:
         self.consecutive_losses = 0
         self.last_trade_time = None
         self.min_trade_interval = 60  # Минимальный интервал между сделками в секундах
-    
-    def can_execute_trade(self, trade_plan):
+        self.var_confidence = 0.95  # Уровень доверия для расчёта VaR
+        self.var_tolerance = 0.1  # Доля VaR, допускаемая в качестве планируемого риска
+        self.capital_risk_fraction = 0.05  # Максимальная доля капитала под риск на сделку
+        self.returns_history = deque(maxlen=500)  # История доходностей для расчёта волатильности
+        self.last_portfolio_value = None
+
+    def calculate_var(self, portfolio_value: float, time_horizon: int = 1) -> float:
+        """Оценивает VaR на основе истории доходностей."""
+
+        if portfolio_value is None or portfolio_value <= 0:
+            return 0.0
+
+        if len(self.returns_history) < 2:
+            # Недостаточно данных, используем консервативную оценку от капитала
+            return portfolio_value * self.capital_risk_fraction
+
+        volatility = pstdev(self.returns_history)
+        if volatility <= 0:
+            return portfolio_value * self.capital_risk_fraction
+
+        z_score = abs(NormalDist().inv_cdf(1 - self.var_confidence))
+        horizon_scale = math.sqrt(max(time_horizon, 1))
+        return portfolio_value * volatility * z_score * horizon_scale
+
+    def can_execute_trade(self, trade_plan, portfolio_value: float | None = None):
         """Проверка возможности выполнения сделки"""
         current_time = datetime.now()
-        
+
+        portfolio_value = portfolio_value or trade_plan.get('portfolio_value') or self.last_portfolio_value
+        var_value = self.calculate_var(portfolio_value, time_horizon=1) if portfolio_value else 0.0
+
+        planned_loss = abs(trade_plan.get('max_loss_usdt') or trade_plan.get('estimated_loss_usdt') or trade_plan.get('estimated_profit_usdt', 0))
+        var_limit = var_value * self.var_tolerance if var_value else 0.0
+        capital_limit = portfolio_value * self.capital_risk_fraction if portfolio_value else 0.0
+
+        effective_loss_limit = None
+        for candidate in [var_limit, capital_limit]:
+            if candidate > 0:
+                effective_loss_limit = candidate if effective_loss_limit is None else min(effective_loss_limit, candidate)
+
+        if effective_loss_limit is None and portfolio_value:
+            effective_loss_limit = portfolio_value * 0.02  # Минимальный ограничитель при отсутствии статистики
+
+        if effective_loss_limit is not None and planned_loss > effective_loss_limit:
+            logger.warning(
+                "🚫 Планируемый убыток %.4f USDT превышает допустимый лимит %.4f USDT на основе VaR",
+                planned_loss,
+                effective_loss_limit,
+            )
+            return False
+
         # Проверка интервала между сделками
         if self.last_trade_time and (current_time - self.last_trade_time).total_seconds() < self.min_trade_interval:
             logger.warning(f"⏳ Слишком частые сделки. Ожидайте {(current_time - self.last_trade_time).total_seconds():.0f} секунд")
@@ -6702,7 +6751,13 @@ class RiskManager:
     def update_after_trade(self, trade_record):
         """Обновление статистики после сделки"""
         profit = trade_record.get('total_profit', 0)
-        
+        portfolio_value = trade_record.get('portfolio_value') or self.last_portfolio_value
+
+        if portfolio_value and portfolio_value > 0:
+            self.last_portfolio_value = portfolio_value + profit
+            period_return = profit / portfolio_value
+            self.returns_history.append(period_return)
+
         if profit < 0:
             self.daily_loss += abs(profit)
             self.consecutive_losses += 1
@@ -7279,8 +7334,16 @@ class RealTradingExecutor:
             logger.warning("⚠️ Невозможно запустить оркестратор без списка ног")
             return None
 
-        safety_plan = {'estimated_profit_usdt': max(0.02, (max_loss_usdt or 0) * -1)}
-        if not self.risk_manager.can_execute_trade(safety_plan):
+        balance_snapshot = self.get_balance()
+        portfolio_value = float(balance_snapshot.get('total') or balance_snapshot.get('available') or 0)
+
+        safety_plan = {
+            'estimated_profit_usdt': max(0.02, (max_loss_usdt or 0) * -1),
+            'portfolio_value': portfolio_value,
+            'max_loss_usdt': max_loss_usdt or 0,
+        }
+
+        if not self.risk_manager.can_execute_trade(safety_plan, portfolio_value=portfolio_value):
             logger.error("❌ Риск-менеджер запретил запуск оркестратора")
             return None
 
@@ -7296,6 +7359,7 @@ class RealTradingExecutor:
             'status': result.get('status'),
             'total_profit': result.get('estimated_profit', 0),
             'simulated': self.simulation_mode,
+            'portfolio_value': portfolio_value,
         }
 
         self.trade_history.append(trade_record)
@@ -7759,7 +7823,12 @@ class RealTradingExecutor:
         """Реальное исполнение торговли"""
         logger.warning("🔥 REAL MODE: Выполнение реальных ордеров")
 
-        if not self.risk_manager.can_execute_trade(trade_plan):
+        balance_snapshot = self.get_balance()
+        portfolio_value = float(balance_snapshot.get('total') or balance_snapshot.get('available') or 0)
+        trade_plan = dict(trade_plan)
+        trade_plan.setdefault('portfolio_value', portfolio_value)
+
+        if not self.risk_manager.can_execute_trade(trade_plan, portfolio_value=portfolio_value):
             logger.error("❌ Риск-менеджер запретил выполнение сделки")
             return None
 
@@ -7789,6 +7858,7 @@ class RealTradingExecutor:
                             'total_profit': -abs(trade_plan.get('estimated_profit_usdt', 0) or 0.01),
                             'status': 'timeout',
                             'simulated': False,
+                            'portfolio_value': portfolio_value,
                         }
 
                         self.trade_history.append(timeout_record)
@@ -7855,7 +7925,8 @@ class RealTradingExecutor:
                 'trade_plan': trade_plan,
                 'results': results,
                 'total_profit': total_profit,
-                'simulated': False
+                'simulated': False,
+                'portfolio_value': portfolio_value,
             }
             
             self.trade_history.append(trade_record)
