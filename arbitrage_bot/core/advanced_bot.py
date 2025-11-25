@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 import inspect
 import logging
 import os
@@ -101,6 +102,75 @@ class GracefulKiller:
     def exit_gracefully(self, signum, frame):
         self.kill_now = True
 
+
+async def _async_trading_loop(engine: AdvancedArbitrageEngine, killer: GracefulKiller):
+    """Асинхронный главный цикл, использующий event loop для сбора котировок."""
+
+    iteration_count = 0
+    start_time = datetime.now()
+    total_opportunities_found = 0
+    update_interval = getattr(engine.config, 'UPDATE_INTERVAL', 3)
+
+    while not killer.kill_now:
+        logger.extra["cycle_id"] = generate_cycle_id()
+        iteration_count += 1
+        cycle_start = time.time()
+
+        if iteration_count % 10 == 0:
+            logger.info(f"\n{'=' * 30} Iteration #{iteration_count} {'=' * 30}")
+            logger.info(f"⏰ Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"🕐 Running for: {str(datetime.now() - start_time).split('.')[0]}")
+
+        try:
+            balance = await asyncio.to_thread(engine.get_effective_balance, 'USDT')
+            balance_usdt = balance['available']
+
+            if iteration_count % 10 == 0:
+                logger.info(f"💰 Account balance: {balance_usdt:.2f} USDT available")
+
+            opportunities = await engine.detect_opportunities_async()
+            if iteration_count % 5 == 0:
+                await asyncio.to_thread(log_market_snapshot, engine)
+            total_opportunities_found += len(opportunities)
+
+            if opportunities:
+                if iteration_count % 5 == 0:
+                    logger.info(f"🎯 Found {len(opportunities)} triangular arbitrage opportunities")
+
+                best_opportunity = opportunities[0]
+                balance_check_passed = balance_usdt > engine.config.TRADE_AMOUNT * 0.5
+                if engine.real_trader.simulation_mode:
+                    balance_check_passed = True
+
+                if balance_check_passed and engine.check_cooldown(best_opportunity['triangle_name']):
+                    logger.info(
+                        f"⭐ Selected: {best_opportunity['triangle_name']} - "
+                        f"{best_opportunity['profit_percent']:.4f}% profit"
+                    )
+
+                    success = await asyncio.to_thread(engine.execute_arbitrage, best_opportunity)
+
+                    if success:
+                        logger.info("✅ SUCCESS! Triangular arbitrage executed")
+
+                        if len(engine.trade_history) % 5 == 0:
+                            report = engine.get_triangle_performance_report()
+                            logger.info(
+                                f"📊 Performance: {report['total_executed_trades']} trades, "
+                                f"Total profit: {report['total_profit']:.4f} USDT"
+                            )
+                    else:
+                        logger.error("❌ FAILED! Arbitrage execution failed")
+                else:
+                    if iteration_count % 20 == 0:
+                        logger.info("🔍 Opportunities found but skipped due to risk management")
+
+            elapsed = time.time() - cycle_start
+            await asyncio.sleep(max(0, update_interval - elapsed))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка в асинхронном торговом цикле: %s", exc)
+            await asyncio.sleep(update_interval)
+
 def main(logger_adapter=None, *, mode: str = "standard", environment: str | None = None):
     """Основная функция запуска улучшенного бота с контекстным логированием."""
 
@@ -153,7 +223,12 @@ def main(logger_adapter=None, *, mode: str = "standard", environment: str | None
 
     engine = AdvancedArbitrageEngine()
     killer = GracefulKiller()
-    
+
+    if engine._should_use_async_market():
+        logger.info("🚦 Включён асинхронный режим сбора котировок через AsyncBybitClient")
+        asyncio.run(_async_trading_loop(engine, killer))
+        return
+
     try:
         iteration_count = 0
         start_time = datetime.now()

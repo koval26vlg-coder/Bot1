@@ -5,6 +5,7 @@ import csv
 import os
 import statistics
 from datetime import datetime
+import asyncio
 import importlib.util
 
 psutil = None
@@ -40,6 +41,27 @@ class AdvancedMonitor:
         self.last_performance_report = None
         self._psutil_warning_logged = False
         self.last_balance_snapshot = None
+
+    def _monitor_tick(self, now: float | None = None):
+        """Единичный проход мониторинга со всеми проверками."""
+
+        current_ts = now or time.time()
+
+        if int(current_ts) % 30 == 0:
+            self.track_system_metrics()
+
+        if int(current_ts) % 3600 == 0:
+            self.generate_performance_report()
+
+        if int(current_ts) % 300 == 0:
+            health = self.health_check()
+            if health.get('status') != 'healthy':
+                logger.warning(f"⚠️ Состояние системы: {health['status']} - {health}")
+
+    async def monitor_tick_async(self):
+        """Асинхронный враппер для интеграции мониторинга в event loop."""
+
+        await asyncio.to_thread(self._monitor_tick, time.time())
 
     def _format_numeric_metric(self, value, precision: int = 4) -> str:
         """Аккуратно форматирует числовые метрики для логов."""
@@ -521,20 +543,7 @@ class AdvancedMonitor:
         def monitoring_loop():
             while True:
                 try:
-                    # Отслеживание системных метрик каждые 30 секунд
-                    if int(time.time()) % 30 == 0:
-                        self.track_system_metrics()
-                    
-                    # Генерация отчета каждый час
-                    if int(time.time()) % 3600 == 0:
-                        self.generate_performance_report()
-                    
-                    # Проверка здоровья системы каждые 5 минут
-                    if int(time.time()) % 300 == 0:
-                        health = self.health_check()
-                        if health['status'] != 'healthy':
-                            logger.warning(f"⚠️ Состояние системы: {health['status']} - {health}")
-                    
+                    self._monitor_tick(time.time())
                     time.sleep(1)
                 except Exception as e:
                     logger.error(f"Error in monitoring loop: {str(e)}")

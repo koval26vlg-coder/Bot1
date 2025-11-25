@@ -113,7 +113,7 @@ class Config:
         # Длительность кэша для треугольников (в секундах)
         self._triangles_cache_ttl = 60
         self.WEBSOCKET_PRICE_ONLY = os.getenv('WEBSOCKET_PRICE_ONLY', 'false').lower() == 'true'
-        self.ENABLE_ASYNC_MARKET_CLIENT = os.getenv('ENABLE_ASYNC_MARKET_CLIENT', 'false').lower() == 'true'
+        self.ENABLE_ASYNC_MARKET_CLIENT = os.getenv('ENABLE_ASYNC_MARKET_CLIENT', 'true').lower() == 'true'
         self.USE_LEGACY_TICKER_CLIENT = os.getenv('USE_LEGACY_TICKER_CLIENT', 'false').lower() == 'true'
         self.ASYNC_TICKER_CONCURRENCY = self._load_int_env('ASYNC_TICKER_CONCURRENCY', 6)
         self.PAPER_TRADING_MODE = os.getenv('PAPER_TRADING_MODE', 'false').lower() == 'true'
