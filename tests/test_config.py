@@ -1,3 +1,4 @@
+import builtins
 import sys
 import time
 from pathlib import Path
@@ -82,6 +83,28 @@ def test_market_category_autodetect_fallback(monkeypatch):
 
     _ = config.MARKET_CATEGORY
     assert calls == ["spot", "linear"]
+
+
+def test_config_loads_without_aiohttp(monkeypatch):
+    """Config создаётся без импорта aiohttp и запуска arbitrage_bot.__init__."""
+
+    for name in ["arbitrage_bot", "arbitrage_bot.core", "arbitrage_bot.core.config"]:
+        sys.modules.pop(name, None)
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name.startswith("aiohttp"):
+            raise ModuleNotFoundError("aiohttp отсутствует для теста")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    config = Config()
+
+    assert hasattr(config, "API_BASE_URL")
+    assert "aiohttp" not in sys.modules
+    assert "arbitrage_bot" not in sys.modules
 
 
 def test_api_base_url_uses_testnet_spot(monkeypatch):
