@@ -5,13 +5,8 @@ import logging
 import os
 import time
 
-import bot_bundle
-from bot_bundle import AdvancedArbitrageEngine, HistoricalReplayer, OptimizedConfig
+from arbitrage_bot import AdvancedArbitrageEngine, HistoricalReplayer, OptimizedConfig, main as advanced_main
 from logging_utils import configure_root_logging, create_adapter, generate_cycle_id
-
-
-# Функция advanced_main получает функцию main из advanced_bot внутри монолитного bot_bundle
-advanced_main = bot_bundle.main
 
 
 def _configure_logging(level: str, mode: str, environment: str):

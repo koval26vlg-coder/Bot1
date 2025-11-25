@@ -6,14 +6,14 @@ import importlib
 def _load_manager_class():
     """Лениво импортирует реализацию менеджера, чтобы избежать циклов."""
 
-    module = importlib.import_module("bot_bundle")
+    module = importlib.import_module("arbitrage_bot.exchanges.bybit_client")
     return module.BybitWebSocketManager
 
 
 def _load_client_class():
     """Лениво импортирует REST-клиент, определённый в монолите."""
 
-    module = importlib.import_module("bot_bundle")
+    module = importlib.import_module("arbitrage_bot.exchanges.bybit_client")
     return module.BybitClient
 
 
