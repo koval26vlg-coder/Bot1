@@ -5,8 +5,11 @@ import logging
 import os
 import time
 
-from arbitrage_bot import AdvancedArbitrageEngine, HistoricalReplayer, OptimizedConfig, main as advanced_main
+from arbitrage_bot.core.engine import AdvancedArbitrageEngine, HistoricalReplayer, run_advanced_bot
+from arbitrage_bot.core.optimized_config import OptimizedConfig
 from logging_utils import configure_root_logging, create_adapter, generate_cycle_id
+
+advanced_main = run_advanced_bot
 
 
 def _configure_logging(level: str, mode: str, environment: str):
