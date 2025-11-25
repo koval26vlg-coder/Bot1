@@ -27,6 +27,7 @@ for _alias in [
 # ==== Начало config.py ====
 import logging
 import os
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -87,6 +88,7 @@ class Config:
         self._available_symbols_cache = None
         self._available_cross_map_cache = None
         self._symbol_watchlist_cache = None
+        self._triangles_last_update = None
         self._okx_symbol_map = {}
         self._symbol_details_map = {}
         self._market_category_override = os.getenv('MARKET_CATEGORY_OVERRIDE')
@@ -135,6 +137,8 @@ class Config:
             'true',
         ).lower() == 'true'
         self._market_symbols_limit = self._load_int_env('MARKET_SYMBOLS_LIMIT', 0)
+        # Длительность кэша для треугольников (в секундах)
+        self._triangles_cache_ttl = 60
         self.WEBSOCKET_PRICE_ONLY = os.getenv('WEBSOCKET_PRICE_ONLY', 'false').lower() == 'true'
         self.ENABLE_ASYNC_MARKET_CLIENT = os.getenv('ENABLE_ASYNC_MARKET_CLIENT', 'false').lower() == 'true'
         self.USE_LEGACY_TICKER_CLIENT = os.getenv('USE_LEGACY_TICKER_CLIENT', 'false').lower() == 'true'
@@ -261,7 +265,11 @@ class Config:
     @property
     def TRIANGULAR_PAIRS(self):
         """Динамическая конфигурация треугольников в зависимости от доступных тикеров"""
-        if self._triangular_pairs_cache is not None:
+        if (
+            self._triangular_pairs_cache is not None
+            and self._triangles_last_update is not None
+            and (time.time() - self._triangles_last_update) < self._triangles_cache_ttl
+        ):
             return self._triangular_pairs_cache
 
         available_symbols = set(self._fetch_market_symbols())
@@ -282,6 +290,7 @@ class Config:
 
             if valid_pairs:
                 self._triangular_pairs_cache = valid_pairs
+                self._triangles_last_update = time.time()
                 return self._triangular_pairs_cache
 
             filtered_templates = [
@@ -296,6 +305,7 @@ class Config:
                     len(filtered_templates),
                 )
                 self._triangular_pairs_cache = filtered_templates
+                self._triangles_last_update = time.time()
                 return self._triangular_pairs_cache
 
             logger.warning(
@@ -304,7 +314,17 @@ class Config:
 
         # Фолбэк (например, оффлайн среда или ошибки сети)
         self._triangular_pairs_cache = templates
+        self._triangles_last_update = time.time()
         return self._triangular_pairs_cache
+
+    def reset_symbol_caches(self):
+        """Сбрасывает кэш доступных символов и зависимых структур."""
+
+        self._available_symbols_cache = None
+        self._available_cross_map_cache = None
+        self._symbol_watchlist_cache = None
+        self._triangular_pairs_cache = None
+        self._triangles_last_update = None
     
     @property
     def MIN_TRIANGULAR_PROFIT(self):
