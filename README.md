@@ -87,6 +87,8 @@ TESTNET=True
 - `PAPER_TRADING_MODE=true` включает paper trading с эмуляцией стакана.
 - `PAPER_BOOK_IMPACT=0.05` настраивает ценовое влияние при нехватке ликвидности в симуляции.
 - `WEBSOCKET_PRICE_ONLY=true` заставляет использовать только WebSocket-котировки без REST-фолбэка.
+- `ENABLE_ASYNC_MARKET_CLIENT=true` по умолчанию активирует асинхронный сбор котировок через `AsyncBybitClient`.
+- `USE_LEGACY_TICKER_CLIENT=true` принудительно откатывает бота к старому синхронному клиенту, если требуется постепенный переход.
 - `REPLAY_DATA_PATH=/path/to/bybit_ticks.csv` задаёт файл для режима `replay`.
 - `REPLAY_SPEED=4` и `REPLAY_MAX_RECORDS=10000` управляют скоростью и объёмом стресс-теста на истории.
 - `MARKET_SYMBOLS_LIMIT=50` позволяет ограничить количество загружаемых тикеров, оставив сортировку по обороту.

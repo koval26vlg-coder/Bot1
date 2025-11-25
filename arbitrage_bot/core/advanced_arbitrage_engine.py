@@ -137,6 +137,30 @@ class AdvancedArbitrageEngine:
             and not legacy_forced
         )
 
+    def _run_coroutine_safely(self, coro):
+        """Запускает корутину с учётом уже активного цикла."""
+
+        try:
+            return asyncio.run(coro)
+        except RuntimeError:
+            created_loop = False
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                created_loop = True
+
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                return future.result()
+
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                if created_loop and not loop.is_running():
+                    loop.close()
+
     def _collect_watchlist_symbols(self) -> set:
         """Собирает полный список тикеров для запроса котировок."""
 
@@ -155,33 +179,23 @@ class AdvancedArbitrageEngine:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self.client.get_tickers, symbols)
 
+    async def _load_market_state_async(self, all_symbols: set[str]):
+        """Параллельно собирает котировки и тикает мониторинг."""
+
+        tasks = [self._fetch_tickers_async(list(all_symbols))]
+
+        if hasattr(self.monitor, 'monitor_tick_async'):
+            tasks.append(self.monitor.monitor_tick_async())
+
+        results = await asyncio.gather(*tasks)
+        tickers = results[0]
+        return tickers
+
     def _fetch_tickers_sync(self, symbols: list[str]):
         """Синхронно получает тикеры, вызывая асинхронный клиент через asyncio при необходимости."""
 
         if self._should_use_async_market():
-            try:
-                return asyncio.run(self._fetch_tickers_async(symbols))
-            except RuntimeError:
-                created_loop = False
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    created_loop = True
-
-                if loop.is_running():
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._fetch_tickers_async(symbols),
-                        loop,
-                    )
-                    return future.result()
-
-                try:
-                    return loop.run_until_complete(self._fetch_tickers_async(symbols))
-                finally:
-                    if created_loop and not loop.is_running():
-                        loop.close()
+            return self._run_coroutine_safely(self._fetch_tickers_async(symbols))
 
         return self.client.get_tickers(symbols)
 
@@ -2132,6 +2146,10 @@ class AdvancedArbitrageEngine:
 
     def detect_opportunities(self):
         """Основной метод для обнаружения арбитражных возможностей"""
+
+        if self._should_use_async_market():
+            return self._run_coroutine_safely(self.detect_opportunities_async())
+
         all_symbols = self._collect_watchlist_symbols()
         tickers = self._fetch_tickers_sync(list(all_symbols))
         return self._process_opportunity_search(tickers, all_symbols)
@@ -2140,7 +2158,7 @@ class AdvancedArbitrageEngine:
         """Асинхронный вариант поиска возможностей с ожиданием загрузки котировок."""
 
         all_symbols = self._collect_watchlist_symbols()
-        tickers = await self._fetch_tickers_async(list(all_symbols))
+        tickers = await self._load_market_state_async(all_symbols)
         return self._process_opportunity_search(tickers, all_symbols)
 
     def _calculate_aggressive_alpha(self, strategy_result, candidate):
