@@ -1641,6 +1641,7 @@ import time
 import json
 import csv
 import os
+import statistics
 from datetime import datetime
 import importlib.util
 
@@ -1677,6 +1678,66 @@ class AdvancedMonitor:
         self.last_performance_report = None
         self._psutil_warning_logged = False
         self.last_balance_snapshot = None
+
+    def _format_numeric_metric(self, value, precision: int = 4) -> str:
+        """Аккуратно форматирует числовые метрики для логов."""
+
+        if value is None:
+            return "н/д"
+        if isinstance(value, float) and value == float("inf"):
+            return "∞"
+        return f"{value:.{precision}f}"
+
+    def _calculate_performance_metrics(self) -> dict:
+        """Вычисляет расширенные показатели эффективности сделок."""
+
+        if not self.trade_history:
+            return {}
+
+        profits = [trade.get('profit', 0) for trade in self.trade_history]
+        gross_profit = sum(p for p in profits if p > 0)
+        gross_loss = -sum(p for p in profits if p < 0)
+        win_trades = [p for p in profits if p > 0]
+        loss_trades = [p for p in profits if p < 0]
+
+        profit_factor = None
+        if gross_loss > 0:
+            profit_factor = gross_profit / gross_loss
+        elif gross_profit > 0:
+            profit_factor = float('inf')
+
+        win_rate = (len(win_trades) / len(profits) * 100) if profits else 0.0
+
+        avg_win = sum(win_trades) / len(win_trades) if win_trades else 0.0
+        avg_loss = -sum(loss_trades) / len(loss_trades) if loss_trades else 0.0
+        avg_win_loss_ratio = None
+        if avg_loss > 0:
+            avg_win_loss_ratio = avg_win / avg_loss
+        elif avg_win > 0:
+            avg_win_loss_ratio = float('inf')
+
+        cumulative = 0.0
+        peak = 0.0
+        max_drawdown = 0.0
+        for profit in profits:
+            cumulative += profit
+            peak = max(peak, cumulative)
+            drawdown = peak - cumulative
+            max_drawdown = max(max_drawdown, drawdown)
+
+        volatility = 0.0
+        if len(profits) > 1:
+            volatility = statistics.pstdev(profits)
+        average_return = statistics.mean(profits) if profits else 0.0
+        sharpe_ratio = average_return / volatility if volatility > 0 else 0.0
+
+        return {
+            'profit_factor': profit_factor,
+            'sharpe_ratio': sharpe_ratio,
+            'max_drawdown': max_drawdown,
+            'win_rate': win_rate,
+            'avg_win_loss_ratio': avg_win_loss_ratio,
+        }
 
     def _get_strategy_status(self):
         """Безопасно возвращает статус стратегии из движка."""
@@ -1869,11 +1930,13 @@ class AdvancedMonitor:
         """Генерация отчета о производительности"""
         if not self.trade_history:
             return None
-        
+
         total_trades = len(self.trade_history)
         successful_trades = sum(1 for trade in self.trade_history if trade.get('profit', 0) > 0)
         total_profit = sum(trade.get('profit', 0) for trade in self.trade_history)
         avg_profit = total_profit / total_trades if total_trades > 0 else 0
+
+        performance_metrics = self._calculate_performance_metrics()
 
         success_rate = (successful_trades / total_trades) * 100 if total_trades > 0 else 0
 
@@ -1896,20 +1959,26 @@ class AdvancedMonitor:
                 'memory_usage': memory_usage,
                 'cooldown_violations': self.cooldown_violations,
                 'api_errors': self.api_errors
-            }
+            },
+            'performance_metrics': performance_metrics,
         }
-        
+
         logger.info(
             f"📊 Отчет о производительности:\n"
             f"   Всего сделок: {report['total_trades']}\n"
             f"   Успешных: {report['successful_trades']} ({report['success_rate']:.1f}%)\n"
             f"   Общая прибыль: {report['total_profit']:.4f} USDT\n"
             f"   Средняя прибыль: {report['avg_profit']:.4f} USDT\n"
-            f"   Время работы: {report['runtime']}"
+            f"   Время работы: {report['runtime']}\n"
+            f"   📈 Profit Factor: {self._format_numeric_metric(performance_metrics.get('profit_factor'))}\n"
+            f"   ⚖️ Sharpe Ratio: {self._format_numeric_metric(performance_metrics.get('sharpe_ratio'))}\n"
+            f"   📉 Max Drawdown: {performance_metrics.get('max_drawdown', 0.0):.4f} USDT\n"
+            f"   🎯 Win Rate: {performance_metrics.get('win_rate', 0.0):.1f}%\n"
+            f"   ⚔️ Avg Win/Loss: {self._format_numeric_metric(performance_metrics.get('avg_win_loss_ratio'))}"
         )
-        
+
         self.last_performance_report = report
-        
+
         return report
     
     def export_trade_history(self, filename=None):
