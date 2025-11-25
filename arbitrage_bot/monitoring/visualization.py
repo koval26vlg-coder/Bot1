@@ -478,6 +478,9 @@ class Dashboard:
                 except Exception as e:
                     print(f"Error updating dashboard data: {e}")
                     time.sleep(5)
-        
+
         update_thread = threading.Thread(target=update_loop, daemon=True)
         update_thread.start()
+
+
+__all__ = ["Dashboard"]

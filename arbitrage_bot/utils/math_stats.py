@@ -26,3 +26,6 @@ def rolling_mean(values: Iterable[float], window: int, min_periods: Optional[int
     if not recent:
         return None
     return float(fmean(recent))
+
+
+__all__ = ["mean", "rolling_mean"]

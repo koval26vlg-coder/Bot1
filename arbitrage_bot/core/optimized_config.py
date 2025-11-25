@@ -45,3 +45,6 @@ class OptimizedConfig(Config):
         if self.TESTNET:
             return 90
         return Config.COOLDOWN_PERIOD
+
+
+__all__ = ["OptimizedConfig"]

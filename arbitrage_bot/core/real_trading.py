@@ -1601,3 +1601,6 @@ class RealTradingExecutor:
         except Exception as e:
             logger.error(f"❌ Error exporting trade history: {str(e)}")
             return None
+
+
+__all__ = ["RealTradingExecutor"]

@@ -552,3 +552,6 @@ class AdvancedMonitor:
         monitor_thread = threading.Thread(target=monitoring_loop, daemon=True)
         monitor_thread.start()
         logger.info("🔄 Advanced monitoring loop started")
+
+
+__all__ = ["AdvancedMonitor"]

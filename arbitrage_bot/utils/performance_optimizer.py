@@ -99,3 +99,6 @@ class PerformanceOptimizer:
                     filtered.append(future_to_triangle[future])
 
         return filtered
+
+
+__all__ = ["PerformanceOptimizer"]
