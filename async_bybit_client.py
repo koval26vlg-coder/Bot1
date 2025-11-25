@@ -7,7 +7,15 @@ import logging
 import time
 from collections.abc import Iterable
 
-import aiohttp
+try:
+    import aiohttp
+except ImportError as exc:
+    print(
+        "Критически важный пакет 'aiohttp' не установлен. "
+        "Установите зависимости командой: pip install -r requirements.txt",
+        flush=True,
+    )
+    raise SystemExit(1) from exc
 
 from arbitrage_bot.core.config import Config
 from arbitrage_bot.exchanges.bybit_client import BybitWebSocketManager
