@@ -6,7 +6,7 @@ import importlib
 def _load_config_class():
     """Лениво импортирует Config, чтобы избежать циклических зависимостей."""
 
-    module = importlib.import_module("bot_bundle")
+    module = importlib.import_module("arbitrage_bot.core.config")
     return module.Config
 
 

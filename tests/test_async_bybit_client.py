@@ -3,6 +3,7 @@ import sys
 import time
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 
@@ -73,7 +74,7 @@ class AsyncBybitClientCacheTests(unittest.IsolatedAsyncioTestCase):
         fake_aiohttp.ClientTimeout = _ClientTimeout
         fake_aiohttp.ClientSession = _ClientSession
 
-        fake_config = types.ModuleType("config")
+        fake_config = types.ModuleType("arbitrage_bot.core.config")
 
         class _Config:
             def __init__(self):
@@ -88,7 +89,18 @@ class AsyncBybitClientCacheTests(unittest.IsolatedAsyncioTestCase):
 
         fake_config.Config = _Config
 
-        fake_bybit_client = types.ModuleType("bybit_client")
+        fake_bybit_client = types.ModuleType("arbitrage_bot.exchanges.bybit_client")
+
+        fake_package = types.ModuleType("arbitrage_bot")
+        fake_package.__path__ = []
+        fake_core = types.ModuleType("arbitrage_bot.core")
+        fake_core.__path__ = []
+        fake_exchanges = types.ModuleType("arbitrage_bot.exchanges")
+        fake_exchanges.__path__ = []
+        fake_package.core = fake_core
+        fake_package.exchanges = fake_exchanges
+        fake_core.config = fake_config
+        fake_exchanges.bybit_client = fake_bybit_client
 
         class _BybitWebSocketManager:
             def __init__(self, *args, **kwargs):
@@ -100,15 +112,22 @@ class AsyncBybitClientCacheTests(unittest.IsolatedAsyncioTestCase):
             sys.modules,
             {
                 "aiohttp": fake_aiohttp,
-                "config": fake_config,
-                "bybit_client": fake_bybit_client,
+                "arbitrage_bot": fake_package,
+                "arbitrage_bot.core": fake_core,
+                "arbitrage_bot.exchanges": fake_exchanges,
+                "arbitrage_bot.core.config": fake_config,
+                "arbitrage_bot.exchanges.bybit_client": fake_bybit_client,
             },
         )
         self.modules_patcher.start()
 
+        project_root = Path(__file__).resolve().parents[1]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+
         self.async_client_module = importlib.import_module("async_bybit_client")
         self.AsyncBybitClient = self.async_client_module.AsyncBybitClient
-        from config import Config
+        from arbitrage_bot.core.config import Config
 
         self.Config = Config
 

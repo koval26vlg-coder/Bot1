@@ -9,8 +9,8 @@ from collections.abc import Iterable
 
 import aiohttp
 
-from bybit_client import BybitWebSocketManager
-from config import Config
+from arbitrage_bot.core.config import Config
+from arbitrage_bot.exchanges.bybit_client import BybitWebSocketManager
 
 logger = logging.getLogger(__name__)
 
