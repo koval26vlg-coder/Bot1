@@ -140,3 +140,6 @@ class OkxClient:
 
         logger.warning("Баланс OKX не поддерживается, возвращаем нулевой")
         return {'coin': coin, 'available': 0.0, 'total': 0.0}
+
+
+__all__ = ["OkxClient"]

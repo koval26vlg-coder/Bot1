@@ -423,3 +423,6 @@ class HistoricalReplayer:
 
         logger.info("✅ Стресс-тест завершён, обработано %s записей", processed)
         return True
+
+
+__all__ = ["HistoricalReplayer", "main"]
