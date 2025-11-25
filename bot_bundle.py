@@ -347,6 +347,7 @@ class Config:
     
     # Настройки риска
     MAX_TRADE_PERCENT = 8
+    MAX_TRADE_AMOUNT = 100  # Жёсткий потолок размера сделки в USDT для ограничений риск-менеджмента
     MAX_DAILY_TRADES = 100
     MAX_LOSS_PERCENT = 0.8
 
@@ -4940,6 +4941,7 @@ class AdvancedArbitrageEngine:
                         'execution_path': best_direction['path'],
                         'timestamp': datetime.now(),
                         'market_conditions': market_analysis['market_conditions'],
+                        'market_volatility': market_analysis.get('overall_volatility', 0.0),
                         'priority': triangle.get('priority', 999),
                         'base_currency': triangle.get('base_currency', 'USDT')
                     }
@@ -5637,17 +5639,22 @@ class AdvancedArbitrageEngine:
     def calculate_advanced_trade(self, opportunity, balance_usdt):
         """Расчет параметров сделки с улучшенным управлением рисками"""
         try:
-            # Динамический расчет суммы на основе волатильности
-            base_amount = min(self.config.TRADE_AMOUNT, balance_usdt * 0.7)
-            
-            # Корректировка суммы в зависимости от рыночных условий
-            if opportunity['market_conditions'] == 'high_volatility':
-                trade_amount = base_amount * 0.5  # Уменьшаем размер при высокой волатильности
-            elif opportunity['market_conditions'] == 'low_volatility':
-                trade_amount = base_amount * 1.2  # Увеличиваем при низкой волатильности
+            # Динамический расчёт объёма с учётом волатильности и уровня риска
+            market_volatility = opportunity.get('market_volatility') or 0.0
+            if getattr(self.real_trader, 'risk_manager', None):
+                trade_amount = self.real_trader.risk_manager.calculate_dynamic_trade_size(
+                    balance_usdt,
+                    market_volatility,
+                )
             else:
-                trade_amount = base_amount
-            
+                trade_amount = min(self.config.TRADE_AMOUNT, balance_usdt * 0.7)
+
+            # Дополнительная страховка для экстремальных режимов рынка
+            if opportunity['market_conditions'] == 'high_volatility':
+                trade_amount *= 0.9  # Усиливаем снижение при резких движениях
+            elif opportunity['market_conditions'] == 'low_volatility':
+                trade_amount *= 1.05  # Небольшое увеличение в спокойных условиях
+
             if trade_amount < 5:  # Минимальная сумма
                 return None
             
@@ -5659,6 +5666,7 @@ class AdvancedArbitrageEngine:
                 'triangle_name': opportunity['triangle_name'],
                 'direction': direction,
                 'initial_amount': trade_amount,
+                'notional_usdt': trade_amount,  # Фиксируем номинал для сопоставления с лимитами риск-менеджера
                 'base_currency': opportunity.get('base_currency', 'USDT'),
                 'estimated_profit_usdt': trade_amount * (opportunity['profit_percent'] / 100),
                 'market_conditions': opportunity['market_conditions'],
@@ -6724,7 +6732,7 @@ logger = logging.getLogger(__name__)
 class RiskManager:
     """Менеджер рисков для реальной торговли"""
 
-    def __init__(self, client: BybitClient | OkxClient | None = None):
+    def __init__(self, client: BybitClient | OkxClient | None = None, config: Config | None = None):
         self.max_daily_loss = 5.0  # Максимальный убыток в день в USDT
         self.max_trade_size_percent = 10  # Максимальный размер сделки в процентах от баланса
         self.max_consecutive_losses = 3  # Максимальное количество убыточных сделок подряд
@@ -6740,6 +6748,46 @@ class RiskManager:
         self.trading_blocked_until: datetime | None = None
         self.client = client
         self.last_reset_date = datetime.now().date()
+        self.config = config or Config()
+
+    def get_risk_level(self) -> str:
+        """Оценивает текущий уровень риска на основе потерь и серии неудачных сделок."""
+
+        if self.daily_loss >= self.max_daily_loss * 0.8 or self.consecutive_losses >= self.max_consecutive_losses:
+            return 'high'
+
+        if self.daily_loss >= self.max_daily_loss * 0.4 or self.consecutive_losses >= (self.max_consecutive_losses // 2):
+            return 'medium'
+
+        return 'low'
+
+    def calculate_dynamic_trade_size(self, balance: float, market_volatility: float | None = None) -> float:
+        """Рассчитывает динамический объём сделки с учётом волатильности и текущего уровня риска.
+
+        Базовый размер ограничивается 10% от баланса и константой MAX_TRADE_AMOUNT.
+        Повышенная волатильность снижает коэффициент объёма, а высокий уровень риска дополнительно
+        сжимает размер сделки. При спокойном рынке допускается небольшой рост объёма относительно базы."""
+
+        if balance is None or balance <= 0:
+            return 0.0
+
+        max_trade_amount = getattr(self.config, 'MAX_TRADE_AMOUNT', balance * 0.1)
+        base_size = min(balance * 0.1, max_trade_amount)
+
+        volatility = market_volatility or 0.0
+        if volatility >= 3:
+            volatility_factor = 0.6
+        elif volatility >= 1:
+            volatility_factor = 0.85
+        else:
+            volatility_factor = 1.1
+
+        risk_level = self.get_risk_level()
+        risk_factor_map = {'high': 0.5, 'medium': 0.75, 'low': 1.0}
+        risk_factor = risk_factor_map.get(risk_level, 1.0)
+
+        dynamic_size = base_size * volatility_factor * risk_factor
+        return max(0.0, min(dynamic_size, max_trade_amount))
 
     def calculate_var(self, portfolio_value: float, time_horizon: int = 1) -> float:
         """Оценивает VaR на основе истории доходностей."""
@@ -7400,7 +7448,7 @@ class RealTradingExecutor:
         self.client = self._select_client()
         self.is_real_mode = False
         self.trade_history = []
-        self.risk_manager = RiskManager(client=self.client)
+        self.risk_manager = RiskManager(client=self.client, config=self.config)
         self.contingent_orchestrator = ContingentOrderOrchestrator(self.client, self.config)
         # Фиктивный баланс для симуляции, чтобы можно было управлять проверками ликвидности
         self._simulated_balance_usdt = self._load_simulated_balance()
