@@ -8,7 +8,7 @@ from datetime import datetime
 from itertools import permutations
 from pathlib import Path
 
-from async_bybit_client import AsyncBybitClient
+from arbitrage_bot.core.async_bybit_client import AsyncBybitClient
 from arbitrage_bot.core.config import Config
 from arbitrage_bot.core.real_trading import RealTradingExecutor
 from arbitrage_bot.exchanges.bybit_client import BybitClient
