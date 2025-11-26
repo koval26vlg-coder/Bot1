@@ -56,17 +56,23 @@ class AsyncBybitClient:
         if self._aiohttp is not None:
             return self._aiohttp
 
+        message = (
+            "Пакет 'aiohttp' не установлен. "
+            "Установите зависимости командой: pip install -r requirements.txt"
+        )
+
         try:
             import aiohttp
         except ImportError as exc:
-            message = (
-                "Пакет 'aiohttp' не установлен. "
-                "Установите зависимости командой: pip install -r requirements.txt"
-            )
             logger.error(message)
             if self.allow_missing_aiohttp:
                 raise RuntimeError(message) from exc
             raise
+
+        if not (hasattr(aiohttp, "ClientSession") and hasattr(aiohttp, "ClientTimeout")):
+            logger.error(message)
+            if self.allow_missing_aiohttp:
+                raise RuntimeError(message)
 
         self._aiohttp = aiohttp
         return aiohttp
