@@ -4,7 +4,10 @@ import threading
 import random
 import math
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import (
+    datetime,
+    timedelta,
+)
 from statistics import NormalDist, pstdev
 import os  # Исправлено: добавлен импорт os
 from arbitrage_bot.core.config import Config
