@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arbitrage-bot"
+version = "0.1.0"
+description = "Algorithmic trading bot for triangular arbitrage"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+py-modules = [
+    "async_bybit_client",
+    "bot_bundle",
+    "bybit_client",
+    "config",
+    "logging_utils",
+    "main",
+    "ml_profit_optimizer",
+]
+
+[tool.setuptools.packages.find]
+include = ["arbitrage_bot*"]

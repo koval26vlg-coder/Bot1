@@ -9,6 +9,7 @@ from typing import Any
 __all__ = [
     "AdvancedArbitrageEngine",
     "AdvancedMonitor",
+    "AsyncBybitClient",
     "BybitClient",
     "BybitWebSocketManager",
     "Config",
@@ -26,6 +27,7 @@ __all__ = [
 _EXPORTS: dict[str, tuple[str, str]] = {
     "AdvancedArbitrageEngine": ("arbitrage_bot.core.advanced_arbitrage_engine", "AdvancedArbitrageEngine"),
     "AdvancedMonitor": ("arbitrage_bot.monitoring.monitoring", "AdvancedMonitor"),
+    "AsyncBybitClient": ("arbitrage_bot.core.async_bybit_client", "AsyncBybitClient"),
     "BybitClient": ("arbitrage_bot.exchanges.bybit_client", "BybitClient"),
     "BybitWebSocketManager": ("arbitrage_bot.exchanges.bybit_client", "BybitWebSocketManager"),
     "Config": ("arbitrage_bot.core.config", "Config"),

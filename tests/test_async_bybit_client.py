@@ -49,6 +49,9 @@ class AsyncBybitClientCacheTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         """Подготавливает поддельные зависимости перед импортом клиента."""
 
+        project_root = Path(__file__).resolve().parents[1]
+        package_root = project_root / "arbitrage_bot"
+
         fake_aiohttp = types.ModuleType("aiohttp")
 
         class _ClientError(Exception):
@@ -92,11 +95,11 @@ class AsyncBybitClientCacheTests(unittest.IsolatedAsyncioTestCase):
         fake_bybit_client = types.ModuleType("arbitrage_bot.exchanges.bybit_client")
 
         fake_package = types.ModuleType("arbitrage_bot")
-        fake_package.__path__ = []
+        fake_package.__path__ = [str(package_root)]
         fake_core = types.ModuleType("arbitrage_bot.core")
-        fake_core.__path__ = []
+        fake_core.__path__ = [str(package_root / "core")]
         fake_exchanges = types.ModuleType("arbitrage_bot.exchanges")
-        fake_exchanges.__path__ = []
+        fake_exchanges.__path__ = [str(package_root / "exchanges")]
         fake_package.core = fake_core
         fake_package.exchanges = fake_exchanges
         fake_core.config = fake_config
@@ -120,12 +123,10 @@ class AsyncBybitClientCacheTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.modules_patcher.start()
-
-        project_root = Path(__file__).resolve().parents[1]
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
 
-        self.async_client_module = importlib.import_module("async_bybit_client")
+        self.async_client_module = importlib.import_module("arbitrage_bot.core.async_bybit_client")
         self.AsyncBybitClient = self.async_client_module.AsyncBybitClient
         from arbitrage_bot.core.config import Config
 
@@ -135,8 +136,12 @@ class AsyncBybitClientCacheTests(unittest.IsolatedAsyncioTestCase):
         """Очищает подмену модулей после теста."""
 
         self.modules_patcher.stop()
-        if "async_bybit_client" in sys.modules:
-            del sys.modules["async_bybit_client"]
+        for module_name in [
+            "arbitrage_bot.core.async_bybit_client",
+            "async_bybit_client",
+        ]:
+            if module_name in sys.modules:
+                del sys.modules[module_name]
 
     async def test_configurable_staleness_filters_cached_tickers(self):
         """Изменение порога свежести в конфиге влияет на выдачу из кэша."""

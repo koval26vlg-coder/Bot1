@@ -2,6 +2,7 @@
 
 import asyncio
 import builtins
+import importlib
 import sys
 import types
 from pathlib import Path
@@ -23,18 +24,20 @@ def test_missing_aiohttp_triggers_help(monkeypatch, caplog):
 
     monkeypatch.setattr(builtins, "__import__", failing_import)
     project_root = Path(__file__).resolve().parents[1]
+    package_root = project_root / "arbitrage_bot"
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
+    sys.modules.pop("arbitrage_bot.core.async_bybit_client", None)
     sys.modules.pop("async_bybit_client", None)
 
     fake_aiohttp_placeholder = types.ModuleType("aiohttp")
 
     fake_package = types.ModuleType("arbitrage_bot")
-    fake_package.__path__ = []
+    fake_package.__path__ = [str(package_root)]
     fake_core = types.ModuleType("arbitrage_bot.core")
-    fake_core.__path__ = []
+    fake_core.__path__ = [str(package_root / "core")]
     fake_exchanges = types.ModuleType("arbitrage_bot.exchanges")
-    fake_exchanges.__path__ = []
+    fake_exchanges.__path__ = [str(package_root / "exchanges")]
 
     fake_config = types.ModuleType("arbitrage_bot.core.config")
 
@@ -81,7 +84,7 @@ def test_missing_aiohttp_triggers_help(monkeypatch, caplog):
         },
     )
 
-    module = __import__("async_bybit_client")
+    module = importlib.import_module("arbitrage_bot.core.async_bybit_client")
     client = module.AsyncBybitClient(allow_missing_aiohttp=True)
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -91,4 +94,5 @@ def test_missing_aiohttp_triggers_help(monkeypatch, caplog):
     assert "pip install -r requirements.txt" in str(excinfo.value)
     assert any("aiohttp" in record.message for record in caplog.records)
 
+    sys.modules.pop("arbitrage_bot.core.async_bybit_client", None)
     sys.modules.pop("async_bybit_client", None)
