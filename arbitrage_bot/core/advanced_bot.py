@@ -1,5 +1,6 @@
 import importlib
 import asyncio
+import csv
 import inspect
 import logging
 import os
@@ -9,17 +10,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# 👇 Гарантируем, что локальная папка проекта всегда есть в sys.path,
-#    чтобы импорты работали даже при запуске скрипта из другой директории
-PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from arbitrage_bot.core.advanced_arbitrage_engine import AdvancedArbitrageEngine
-from arbitrage_bot.core.optimized_config import OptimizedConfig
+from .advanced_arbitrage_engine import AdvancedArbitrageEngine
+from .optimized_config import OptimizedConfig
 from logging_utils import configure_root_logging, create_adapter, generate_cycle_id
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def ensure_psutil_available():
