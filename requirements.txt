@@ -7,3 +7,4 @@ dash==2.17.1
 dash-bootstrap-components==1.6.0
 psutil==6.1.0
 aiohttp==3.10.5
+pytest==8.4.2
