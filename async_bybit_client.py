@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import aiohttp
+    from arbitrage_bot.exchanges.bybit_client import BybitWebSocketManager
 
-from arbitrage_bot.core.config import Config
-from arbitrage_bot.exchanges.bybit_client import BybitWebSocketManager
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class AsyncBybitClient:
         self.allow_missing_aiohttp = allow_missing_aiohttp
         self._aiohttp: Any | None = None
         self._session: "aiohttp.ClientSession | None" = None
-        self.ws_manager: BybitWebSocketManager | None = None
+        self.ws_manager: "BybitWebSocketManager | None" = None
         self._temporarily_unavailable_symbols: set[str] = set()
         self._initialize_websocket_streams()
 
@@ -85,6 +85,8 @@ class AsyncBybitClient:
         """Запускает WebSocket-менеджер для кэширования котировок."""
 
         try:
+            from arbitrage_bot.exchanges.bybit_client import BybitWebSocketManager
+
             self.ws_manager = BybitWebSocketManager(self.config)
             self.ws_manager.start(self.config.SYMBOLS)
         except Exception as exc:  # noqa: BLE001

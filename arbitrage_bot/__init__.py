@@ -1,19 +1,10 @@
 """Пакет с компонентами арбитражного бота."""
 
-from arbitrage_bot.core.advanced_arbitrage_engine import AdvancedArbitrageEngine
-from arbitrage_bot.core.advanced_bot import HistoricalReplayer
-from arbitrage_bot.core.config import Config
-from arbitrage_bot.core.engine import run_advanced_bot
-from arbitrage_bot.core.optimized_config import OptimizedConfig
-from arbitrage_bot.core.real_trading import RealTradingExecutor
-from arbitrage_bot.exchanges.bybit_client import BybitClient, BybitWebSocketManager
-from arbitrage_bot.exchanges.okx_client import OkxClient
-from arbitrage_bot.monitoring.monitoring import AdvancedMonitor
-from arbitrage_bot.monitoring.visualization import Dashboard
-from arbitrage_bot.strategies.indicator_strategies import StrategyManager
+from __future__ import annotations
 
-advanced_main = run_advanced_bot
-main = run_advanced_bot
+import importlib
+from types import ModuleType
+from typing import Any
 
 __all__ = [
     "AdvancedArbitrageEngine",
@@ -31,3 +22,44 @@ __all__ = [
     "main",
     "run_advanced_bot",
 ]
+
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "AdvancedArbitrageEngine": ("arbitrage_bot.core.advanced_arbitrage_engine", "AdvancedArbitrageEngine"),
+    "AdvancedMonitor": ("arbitrage_bot.monitoring.monitoring", "AdvancedMonitor"),
+    "BybitClient": ("arbitrage_bot.exchanges.bybit_client", "BybitClient"),
+    "BybitWebSocketManager": ("arbitrage_bot.exchanges.bybit_client", "BybitWebSocketManager"),
+    "Config": ("arbitrage_bot.core.config", "Config"),
+    "Dashboard": ("arbitrage_bot.monitoring.visualization", "Dashboard"),
+    "HistoricalReplayer": ("arbitrage_bot.core.advanced_bot", "HistoricalReplayer"),
+    "OkxClient": ("arbitrage_bot.exchanges.okx_client", "OkxClient"),
+    "OptimizedConfig": ("arbitrage_bot.core.optimized_config", "OptimizedConfig"),
+    "RealTradingExecutor": ("arbitrage_bot.core.real_trading", "RealTradingExecutor"),
+    "StrategyManager": ("arbitrage_bot.strategies.indicator_strategies", "StrategyManager"),
+    "advanced_main": ("arbitrage_bot.core.engine", "run_advanced_bot"),
+    "main": ("arbitrage_bot.core.engine", "run_advanced_bot"),
+    "run_advanced_bot": ("arbitrage_bot.core.engine", "run_advanced_bot"),
+}
+
+
+def _load_export(name: str) -> Any:
+    """Лениво импортирует целевой объект, избегая побочных эффектов."""
+
+    module_name, attr_name = _EXPORTS[name]
+    module: ModuleType = importlib.import_module(module_name)
+    value: Any = getattr(module, attr_name)
+    globals()[name] = value
+    return value
+
+
+def __getattr__(name: str) -> Any:
+    """Возвращает экспортируемый атрибут по требованию."""
+
+    if name in _EXPORTS:
+        return _load_export(name)
+    raise AttributeError(name)
+
+
+def __dir__() -> list[str]:
+    """Возвращает доступные атрибуты модуля."""
+
+    return sorted(set(globals().keys()) | set(_EXPORTS.keys()))
