@@ -54,10 +54,14 @@ class BybitWebSocketManager:
         """Остановка всех подключений (используется при завершении работы)."""
 
         self._stop_event.set()
-        if self._public_ws and hasattr(self._public_ws, 'exit'):
-            self._public_ws.exit()
-        if self._private_ws and hasattr(self._private_ws, 'exit'):
-            self._private_ws.exit()
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=5)
+
+        self._shutdown_ws(self._public_ws)
+        self._shutdown_ws(self._private_ws)
+
+        self._public_ws = None
+        self._private_ws = None
 
     def register_order_listener(self, callback):
         """Регистрирует обработчик событий ордеров и инициирует приватный стрим."""
@@ -114,10 +118,13 @@ class BybitWebSocketManager:
             try:
                 now = time.time()
                 if self._symbols and (self._public_ws is None or now - self._last_ticker_ts > self._max_staleness):
+                    if self._public_ws is None:
+                        logger.debug("Обнаружено закрытое публичное подключение, инициируем переподключение")
                     logger.debug("Переподключение публичного стрима котировок")
                     self._restart_public_ws()
 
                 if self._order_listeners and self._private_ws is None:
+                    logger.debug("Обнаружено закрытое приватное подключение, инициируем переподключение")
                     logger.debug("Переподключение приватного стрима ордеров")
                     self._connect_private_ws()
             except Exception as exc:
@@ -167,8 +174,8 @@ class BybitWebSocketManager:
         """Перезапускает публичное подключение."""
 
         try:
-            if self._public_ws and hasattr(self._public_ws, 'exit'):
-                self._public_ws.exit()
+            self._shutdown_ws(self._public_ws)
+            self._public_ws = None
         finally:
             self._connect_public_ws()
 
@@ -195,6 +202,30 @@ class BybitWebSocketManager:
         except Exception as exc:
             logger.warning("Не удалось подключиться к приватному стриму ордеров: %s", exc)
             self._private_ws = None
+
+    def _shutdown_ws(self, ws):
+        """Аккуратное завершение WebSocket с остановкой служебных потоков."""
+
+        if not ws:
+            return
+
+        try:
+            ping_timer = getattr(ws, "custom_ping_timer", None)
+            if ping_timer:
+                stop_method = getattr(ping_timer, "cancel", None) or getattr(ping_timer, "stop", None)
+                if callable(stop_method):
+                    stop_method()
+
+            ping_thread = getattr(ws, "ping_thread", None)
+            if ping_thread and hasattr(ping_thread, "join"):
+                ping_thread.join(timeout=2)
+
+            if hasattr(ws, "exit"):
+                ws.exit()
+            elif hasattr(ws, "close"):
+                ws.close()
+        except Exception:
+            logger.debug("Ошибка при завершении WebSocket", exc_info=True)
 
     def _handle_ticker(self, message):
         """Нормализация входящих котировок и сохранение в кэше."""
