@@ -138,7 +138,6 @@ class AsyncBybitClientCacheTests(unittest.IsolatedAsyncioTestCase):
         self.modules_patcher.stop()
         for module_name in [
             "arbitrage_bot.core.async_bybit_client",
-            "async_bybit_client",
         ]:
             if module_name in sys.modules:
                 del sys.modules[module_name]

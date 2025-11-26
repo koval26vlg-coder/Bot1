@@ -1,4 +1,5 @@
 import builtins
+import importlib
 import sys
 import time
 from pathlib import Path
@@ -10,7 +11,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import Config
+
+def _load_config_module():
+    """Подгружает модуль конфигурации после применения переменных окружения."""
+
+    if "arbitrage_bot.core.config" in sys.modules:
+        return importlib.reload(sys.modules["arbitrage_bot.core.config"])
+    return importlib.import_module("arbitrage_bot.core.config")
 
 
 class DummyResponse:
@@ -50,7 +57,8 @@ def test_market_category_autodetect_success(monkeypatch, market_hint, expected_c
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    config = Config()
+    module = _load_config_module()
+    config = module.Config()
 
     assert config.MARKET_CATEGORY == expected_category
     assert config._detected_market_category == expected_category
@@ -75,7 +83,8 @@ def test_market_category_autodetect_fallback(monkeypatch):
 
     monkeypatch.setattr(requests, "get", failing_get)
 
-    config = Config()
+    module = _load_config_module()
+    config = module.Config()
 
     assert config.MARKET_CATEGORY == "linear"
     assert config._detected_market_category == "linear"
@@ -100,11 +109,11 @@ def test_config_loads_without_aiohttp(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
-    config = Config()
+    module = _load_config_module()
+    config = module.Config()
 
     assert hasattr(config, "API_BASE_URL")
     assert "aiohttp" not in sys.modules
-    assert "arbitrage_bot" not in sys.modules
 
 
 def test_api_base_url_uses_testnet_spot(monkeypatch):
@@ -115,7 +124,8 @@ def test_api_base_url_uses_testnet_spot(monkeypatch):
     monkeypatch.setenv("TESTNET_SPOT_API_BASE_URL", "https://custom.test")
     monkeypatch.setenv("ARBITRAGE_TICKER_CATEGORY", "spot")
 
-    config = Config()
+    module = _load_config_module()
+    config = module.Config()
 
     assert config.MARKET_CATEGORY == "spot"
     assert config.API_BASE_URL == "https://custom.test"
@@ -129,7 +139,8 @@ def test_min_profit_and_numeric_env_overrides(monkeypatch):
     monkeypatch.setenv("EMPTY_CYCLE_RELAX_STEP", "нечисло")
     monkeypatch.setenv("MARKET_SYMBOLS_LIMIT", "abc")
 
-    config = Config()
+    module = _load_config_module()
+    config = module.Config()
 
     assert config.MIN_TRIANGULAR_PROFIT == 0.42
     assert pytest.approx(config.EMPTY_CYCLE_RELAX_STEP, rel=1e-6) == 0.05
@@ -159,7 +170,8 @@ def test_triangular_pairs_cache_reset(monkeypatch):
             }
         ]
 
-    config = Config()
+    module = _load_config_module()
+    config = module.Config()
     real_cls = config.__class__
 
     monkeypatch.setattr(real_cls, "_fetch_market_symbols", fake_fetch)
