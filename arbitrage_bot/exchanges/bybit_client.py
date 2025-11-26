@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
 
 import aiohttp
+import requests
 from arbitrage_bot.core.config import Config
 
 try:
