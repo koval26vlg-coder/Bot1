@@ -117,20 +117,50 @@ class BybitWebSocketManager:
         while not self._stop_event.is_set():
             try:
                 now = time.time()
-                if self._symbols and (self._public_ws is None or now - self._last_ticker_ts > self._max_staleness):
-                    if self._public_ws is None:
+                public_alive = self._is_ws_active(self._public_ws)
+                if self._symbols and (self._public_ws is None or not public_alive or now - self._last_ticker_ts > self._max_staleness):
+                    if self._public_ws is None or not public_alive:
                         logger.debug("Обнаружено закрытое публичное подключение, инициируем переподключение")
+                        self._shutdown_ws(self._public_ws)
+                        self._public_ws = None
                     logger.debug("Переподключение публичного стрима котировок")
                     self._restart_public_ws()
 
-                if self._order_listeners and self._private_ws is None:
-                    logger.debug("Обнаружено закрытое приватное подключение, инициируем переподключение")
+                private_alive = self._is_ws_active(self._private_ws)
+                if self._order_listeners and (self._private_ws is None or not private_alive):
+                    if self._private_ws is None or not private_alive:
+                        logger.debug("Обнаружено закрытое приватное подключение, инициируем переподключение")
+                        self._shutdown_ws(self._private_ws)
+                        self._private_ws = None
                     logger.debug("Переподключение приватного стрима ордеров")
                     self._connect_private_ws()
             except Exception as exc:
                 logger.warning("Ошибка мониторинга WebSocket: %s", exc)
 
             time.sleep(3)
+
+    def _is_ws_active(self, ws):
+        """Проверяет наличие живого соединения WebSocket."""
+
+        if not ws:
+            return False
+
+        inner_ws = getattr(ws, "ws", None)
+        if inner_ws is None:
+            return False
+
+        connected_flag = getattr(inner_ws, "connected", None)
+        if isinstance(connected_flag, bool):
+            return connected_flag
+
+        sock = getattr(inner_ws, "sock", None)
+        if sock is None:
+            return False
+
+        if hasattr(sock, "connected"):
+            return bool(sock.connected)
+
+        return True
 
     def _connect_public_ws(self):
         """Создаёт подключение для получения котировок."""
@@ -215,6 +245,14 @@ class BybitWebSocketManager:
                 stop_method = getattr(ping_timer, "cancel", None) or getattr(ping_timer, "stop", None)
                 if callable(stop_method):
                     stop_method()
+                if hasattr(ping_timer, "is_alive") and ping_timer.is_alive():
+                    ping_timer.join(timeout=1)
+
+            if hasattr(ws, "custom_ping_running"):
+                try:
+                    ws.custom_ping_running = False
+                except Exception:
+                    logger.debug("Не удалось обновить флаг custom_ping_running", exc_info=True)
 
             ping_thread = getattr(ws, "ping_thread", None)
             if ping_thread and hasattr(ping_thread, "join"):
