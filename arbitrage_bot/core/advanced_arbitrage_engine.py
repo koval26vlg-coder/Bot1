@@ -99,6 +99,10 @@ class AdvancedArbitrageEngine:
             getattr(self.config, 'ML_MODEL_PATH', 'models/profit_threshold_model.pkl'),
             getattr(self.config, 'ML_FALLBACK_THRESHOLD', getattr(self.config, 'MIN_TRIANGULAR_PROFIT', 0.0)),
         )
+        if not getattr(self.ml_profit_optimizer, 'ml_supported', True):
+            logger.info(
+                "MLProfitOptimizer запущен в режиме фолбэка: scikit-learn недоступен, используются статические пороги"
+            )
 
         if reset_state:
             self._initialize_data_structures()

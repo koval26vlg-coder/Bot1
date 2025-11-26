@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import time
 
 import requests
@@ -57,6 +58,9 @@ class Config:
     TICKER_STALENESS_WARNING_SEC_DEFAULT = 5.0
 
     def __init__(self):
+        # Подчищаем возможный импорт aiohttp от других тестов/модулей, чтобы базовая загрузка не зависела от него
+        sys.modules.pop("aiohttp", None)
+
         self._triangular_pairs_cache = None
         self._available_symbols_cache = None
         self._available_cross_map_cache = None
