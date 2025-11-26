@@ -1,4 +1,6 @@
-"""Совместимость с устаревшим монолитным модулем."""
+"""Устаревший бандл, перенаправляющий импорты в основной пакет."""
+
+import warnings
 
 from arbitrage_bot import (
     AdvancedArbitrageEngine,
@@ -16,6 +18,12 @@ from arbitrage_bot import (
 )
 from arbitrage_bot.utils.math_stats import mean, rolling_mean
 from arbitrage_bot.utils.performance_optimizer import PerformanceOptimizer
+
+warnings.warn(
+    "bot_bundle устарел; импортируйте объекты напрямую из arbitrage_bot",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 __all__ = [
     "AdvancedArbitrageEngine",

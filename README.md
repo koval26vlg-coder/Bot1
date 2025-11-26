@@ -5,15 +5,15 @@
 ## Структура проекта
 
 - `main.py` — единый CLI для выбора режима запуска.
-- `advanced_bot.py` — оболочка над движком с мониторингом и логированием.
-- `advanced_arbitrage_engine.py` — ядро поиска и оценки арбитражных возможностей.
-- `bybit_client.py` — REST/WebSocket-клиент для котировок и ордеров.
-- `config.py` — конфигурация по умолчанию, загрузка и отбор инструментов.
-- `indicator_strategies.py` — набор индикаторов и фильтров для сигналов.
-- `real_trading.py` — исполнение сделок и расчёт параметров ордеров.
-- `performance_optimizer.py` — оптимизация параметров и профилирование циклов.
-- `monitoring.py` — сбор системных метрик и экспорт состояния.
-- `math_stats.py` — статистические утилиты для анализа данных.
+- `arbitrage_bot/core/advanced_bot.py` — оболочка над движком с мониторингом и логированием.
+- `arbitrage_bot/core/advanced_arbitrage_engine.py` — ядро поиска и оценки арбитражных возможностей.
+- `arbitrage_bot/exchanges/bybit_client.py` — REST/WebSocket-клиент для котировок и ордеров.
+- `arbitrage_bot/core/config.py` — конфигурация по умолчанию, загрузка и отбор инструментов.
+- `arbitrage_bot/strategies/indicator_strategies.py` — набор индикаторов и фильтров для сигналов.
+- `arbitrage_bot/core/real_trading.py` — исполнение сделок и расчёт параметров ордеров.
+- `arbitrage_bot/utils/performance_optimizer.py` — оптимизация параметров и профилирование циклов.
+- `arbitrage_bot/monitoring/monitoring.py` — сбор системных метрик и экспорт состояния.
+- `arbitrage_bot/utils/math_stats.py` — статистические утилиты для анализа данных.
 - `requirements.txt` — список необходимых зависимостей.
 
 ## Режимы запуска через CLI

@@ -28,7 +28,6 @@ def test_missing_aiohttp_triggers_help(monkeypatch, caplog):
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
     sys.modules.pop("arbitrage_bot.core.async_bybit_client", None)
-    sys.modules.pop("async_bybit_client", None)
 
     fake_aiohttp_placeholder = types.ModuleType("aiohttp")
 
@@ -95,4 +94,3 @@ def test_missing_aiohttp_triggers_help(monkeypatch, caplog):
     assert any("aiohttp" in record.message for record in caplog.records)
 
     sys.modules.pop("arbitrage_bot.core.async_bybit_client", None)
-    sys.modules.pop("async_bybit_client", None)
