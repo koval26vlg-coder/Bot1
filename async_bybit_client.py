@@ -6,16 +6,10 @@ import asyncio
 import logging
 import time
 from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
 
-try:
+if TYPE_CHECKING:
     import aiohttp
-except ImportError as exc:
-    print(
-        "Критически важный пакет 'aiohttp' не установлен. "
-        "Установите зависимости командой: pip install -r requirements.txt",
-        flush=True,
-    )
-    raise SystemExit(1) from exc
 
 from arbitrage_bot.core.config import Config
 from arbitrage_bot.exchanges.bybit_client import BybitWebSocketManager
@@ -26,11 +20,13 @@ logger = logging.getLogger(__name__)
 class AsyncBybitClient:
     """Асинхронный REST-клиент для получения котировок по API Bybit."""
 
-    def __init__(self, config: Config | None = None):
+    def __init__(self, config: Config | None = None, allow_missing_aiohttp: bool = False):
         self.config = config or Config()
         self.base_url = self.config.API_BASE_URL
         self.market_category = getattr(self.config, "MARKET_CATEGORY", "spot")
-        self._session: aiohttp.ClientSession | None = None
+        self.allow_missing_aiohttp = allow_missing_aiohttp
+        self._aiohttp: Any | None = None
+        self._session: "aiohttp.ClientSession | None" = None
         self.ws_manager: BybitWebSocketManager | None = None
         self._temporarily_unavailable_symbols: set[str] = set()
         self._initialize_websocket_streams()
@@ -54,8 +50,31 @@ class AsyncBybitClient:
         if self.ws_manager:
             self.ws_manager.stop()
 
+    def _get_aiohttp(self):
+        """Лениво импортирует aiohttp и возвращает модуль или выдаёт понятную ошибку."""
+
+        if self._aiohttp is not None:
+            return self._aiohttp
+
+        try:
+            import aiohttp
+        except ImportError as exc:
+            message = (
+                "Пакет 'aiohttp' не установлен. "
+                "Установите зависимости командой: pip install -r requirements.txt"
+            )
+            logger.error(message)
+            if self.allow_missing_aiohttp:
+                raise RuntimeError(message) from exc
+            raise
+
+        self._aiohttp = aiohttp
+        return aiohttp
+
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Создаёт или возвращает существующую HTTP-сессию."""
+
+        aiohttp = self._get_aiohttp()
 
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=10)
@@ -102,7 +121,7 @@ class AsyncBybitClient:
 
                     try:
                         payload = await response.json()
-                    except aiohttp.ContentTypeError:
+                    except self._get_aiohttp().ContentTypeError:
                         payload = None
 
                     is_heavy, message = self._classify_response(status, payload)
@@ -123,7 +142,7 @@ class AsyncBybitClient:
                         delay,
                     )
                     await asyncio.sleep(delay)
-            except aiohttp.ClientError as exc:
+            except self._get_aiohttp().ClientError as exc:
                 last_error = str(exc)
                 delay = heavy_backoff * (2 ** (attempt - 1))
                 logger.warning(
