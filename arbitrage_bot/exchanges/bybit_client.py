@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Iterable
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
