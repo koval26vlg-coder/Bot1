@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from logging_utils import configure_root_logging, create_adapter, generate_cycle
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent
+shutdown_flag = threading.Event()
 
 
 def ensure_psutil_available():
@@ -90,13 +92,14 @@ def log_market_snapshot(engine, max_symbols=None):
 class GracefulKiller:
     """Обработчик сигналов для graceful shutdown"""
     kill_now = False
-    
+
     def __init__(self):
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
-    
+
     def exit_gracefully(self, signum, frame):
         self.kill_now = True
+        shutdown_flag.set()
 
 
 async def _async_trading_loop(engine: AdvancedArbitrageEngine, killer: GracefulKiller):
@@ -107,7 +110,7 @@ async def _async_trading_loop(engine: AdvancedArbitrageEngine, killer: GracefulK
     total_opportunities_found = 0
     update_interval = getattr(engine.config, 'UPDATE_INTERVAL', 3)
 
-    while not killer.kill_now:
+    while not killer.kill_now and not shutdown_flag.is_set():
         logger.extra["cycle_id"] = generate_cycle_id()
         iteration_count += 1
         cycle_start = time.time()
@@ -219,18 +222,19 @@ def main(logger_adapter=None, *, mode: str = "standard", environment: str | None
 
     engine = AdvancedArbitrageEngine()
     killer = GracefulKiller()
+    use_async_market = engine._should_use_async_market()
+    iteration_count = 0
+    total_opportunities_found = 0
 
-    if engine._should_use_async_market():
+    if use_async_market:
         logger.info("🚦 Включён асинхронный режим сбора котировок через AsyncBybitClient")
         asyncio.run(_async_trading_loop(engine, killer))
         return
 
     try:
-        iteration_count = 0
         start_time = datetime.now()
-        total_opportunities_found = 0
 
-        while not killer.kill_now:
+        while not shutdown_flag.is_set() and not killer.kill_now:
             logger.extra["cycle_id"] = generate_cycle_id()
             iteration_count += 1
             cycle_start = time.time()
@@ -295,9 +299,13 @@ def main(logger_adapter=None, *, mode: str = "standard", environment: str | None
                         engine.monitor.send_system_summary()
                 
             except Exception as e:
-                logger.error(f"🔥 Critical error during iteration: {str(e)}", exc_info=True)
+                logger.error(
+                    f"❌ Ошибка в основном цикле: {str(e)}",
+                    exc_info=True,
+                )
                 if hasattr(engine, 'monitor') and hasattr(engine.monitor, 'track_api_error'):
                     engine.monitor.track_api_error("main_loop", str(e))
+                time.sleep(5)
             
             # Соблюдение интервала обновления
             cycle_time = time.time() - cycle_start
@@ -309,11 +317,16 @@ def main(logger_adapter=None, *, mode: str = "standard", environment: str | None
                 logger.warning(f"⚡ Cycle took longer than interval: {cycle_time:.2f}s")
             
     except KeyboardInterrupt:
-        logger.info("\n\n🛑 Bot stopped by user (Ctrl+C)")
+        logger.info("🛑 Получен KeyboardInterrupt. Начинаю плавное завершение...")
     except Exception as e:
         logger.critical(f"🔥 Bot crashed unexpectedly: {str(e)}", exc_info=True)
     finally:
-        logger.info("🔧 Bot shutdown complete")
+        logger.info("🔧 Выполняю финальную очистку ресурсов...")
+        if engine:
+            try:
+                engine.shutdown()
+            except Exception:
+                logger.exception("Не удалось корректно завершить работу движка")
 
         # Финальные отчеты и экспорт
         if hasattr(engine, 'monitor') and hasattr(engine.monitor, 'export_trade_history'):
@@ -337,12 +350,11 @@ def main(logger_adapter=None, *, mode: str = "standard", environment: str | None
             logger.info("🏆 TOP 3 TRIANGLES:")
             for name, stats in best_triangles:
                 logger.info(
-                    f"   {name}: {stats['executed_trades']} trades, "
-                    f"{stats['total_profit']:.4f} USDT profit, "
-                    f"{stats['success_rate']:.1%} success rate"
+                    f"   {name}: {stats['total_profit']:.4f} USDT, "
+                    f"{stats.get('win_rate', stats.get('success_rate', 0)):.2f}% win rate"
                 )
 
-        logger.info("=" * 70)
+        logger.info("✅ Бот успешно завершил работу")
 
 
 class HistoricalReplayer:

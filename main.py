@@ -3,6 +3,9 @@
 import argparse
 import logging
 import os
+import signal
+import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
@@ -12,6 +15,19 @@ from arbitrage_bot.core.optimized_config import OptimizedConfig
 from logging_utils import configure_root_logging, create_adapter, generate_cycle_id
 
 advanced_main = run_advanced_bot
+
+
+def signal_handler(sig, frame):
+    """Глобальный обработчик KeyboardInterrupt для плавного завершения."""
+
+    print("\n\n🛑 Получен сигнал прерывания (Ctrl+C). Выполняется плавное завершение...")
+    print("⏳ Ожидание завершения текущих операций...")
+    shutdown_flag.set()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+shutdown_flag = threading.Event()
 
 
 @dataclass(frozen=True)

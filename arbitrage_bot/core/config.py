@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import threading
 import time
 
 from concurrent.futures import ThreadPoolExecutor
@@ -556,7 +557,7 @@ class Config:
         return static_templates
 
     def _build_dynamic_triangle_templates(self, available_symbols, limit: int | None = None):
-        """Генерация всех возможных треугольников на основе доступных инструментов"""
+        """Построение динамических шаблонов треугольников с возможностью прерывания."""
         if not available_symbols:
             return []
 
@@ -571,7 +572,27 @@ class Config:
         if not base_candidates:
             return []
 
+        processed_count = 0
+        total_symbols = len(base_candidates)
+
+        logger.info(
+            f"🔄 Начинаю построение треугольных пар из {total_symbols} доступных символов..."
+        )
+
         for base_currency in base_candidates:
+            if not threading.current_thread().is_alive():
+                logger.warning("⚠️ Процесс прерван пользователем во время построения треугольников")
+                break
+
+            processed_count += 1
+
+            if processed_count % max(1, total_symbols // 10) == 0:
+                progress = (processed_count / total_symbols) * 100
+                logger.info(
+                    f"📊 Прогресс построения треугольников: {progress:.1f}% "
+                    f"({processed_count}/{total_symbols})"
+                )
+
             connected_assets = sorted(self._collect_connected_assets(base_currency, available_symbols))
             if len(connected_assets) < 2:
                 continue
@@ -584,12 +605,19 @@ class Config:
                     if secondary_asset in {primary_asset, base_currency}:
                         continue
 
-                    leg_options = self._collect_leg_combinations(
-                        base_currency,
-                        primary_asset,
-                        secondary_asset,
-                        available_symbols,
-                    )
+                    try:
+                        leg_options = self._collect_leg_combinations(
+                            base_currency,
+                            primary_asset,
+                            secondary_asset,
+                            available_symbols,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            f"⚠️ Ошибка при обработке символа {base_currency}: {str(e)}"
+                        )
+                        continue
+
                     if not leg_options:
                         continue
 
@@ -617,12 +645,10 @@ class Config:
                         registered.add(combination_name)
 
                         if limit and len(templates) >= limit:
-                            logger.debug(
-                                "Достигнут лимит ускоренного режима: %s треугольников",  # noqa: E501
-                                limit,
-                            )
+                            logger.info(f"🎯 Достигнут лимит треугольных пар: {limit}")
                             return templates
 
+        logger.info(f"✅ Успешно построено {len(templates)} треугольных пар")
         return templates
 
     def _build_static_triangle_templates(self, available_symbols=None):
