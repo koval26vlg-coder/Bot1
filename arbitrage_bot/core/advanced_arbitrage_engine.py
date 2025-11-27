@@ -174,6 +174,20 @@ class AdvancedArbitrageEngine:
                 all_symbols.add(symbol)
         return all_symbols
 
+    def _collect_futures_symbols(self) -> set:
+        """Извлекает список фьючерсных тикеров из конфигурации."""
+
+        futures = set()
+        for triangle in self.config.TRIANGULAR_PAIRS:
+            legs = triangle.get('legs', [])
+            leg_types = triangle.get('leg_types', ['spot'] * len(legs))
+
+            for leg, leg_type in zip(legs, leg_types):
+                if leg_type and str(leg_type).lower() != 'spot':
+                    futures.add(leg)
+
+        return futures
+
     async def _fetch_tickers_async(self, symbols: list[str]):
         """Асинхронно получает тикеры, поддерживая как async, так и синхронный клиент."""
 
@@ -182,6 +196,57 @@ class AdvancedArbitrageEngine:
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self.client.get_tickers, symbols)
+
+    def _fetch_funding_rates(self, symbols: set[str]) -> dict:
+        """Запрашивает ставки фандинга для выбранных тикеров и кеширует их."""
+
+        funding_method = getattr(self.client, 'get_funding_rates', None)
+        if not callable(funding_method):
+            self.last_funding_rates = {}
+            return {}
+
+        if not symbols:
+            self.last_funding_rates = {}
+            return {}
+
+        try:
+            funding = funding_method(list(symbols)) or {}
+            normalized = {}
+            default_interval = float(getattr(self.config, 'FUNDING_INTERVAL_HOURS', 8.0))
+
+            for symbol, data in funding.items():
+                if isinstance(data, dict):
+                    rate = self._safe_float(
+                        data.get('rate')
+                        or data.get('funding_rate')
+                        or data.get('fundingRate'),
+                        0.0,
+                    )
+                    interval_hours = self._safe_float(
+                        data.get('interval_hours')
+                        or data.get('funding_interval')
+                        or data.get('fundingInterval'),
+                        default_interval,
+                    )
+                    normalized[symbol] = {
+                        'rate': rate,
+                        'interval_hours': interval_hours,
+                        'next_funding_time': data.get('next_funding_time')
+                        or data.get('nextFundingTime'),
+                    }
+                else:
+                    normalized[symbol] = {
+                        'rate': self._safe_float(data, 0.0),
+                        'interval_hours': default_interval,
+                        'next_funding_time': None,
+                    }
+
+            self.last_funding_rates = normalized
+            return normalized
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось получить ставки фандинга: %s", exc)
+            self.last_funding_rates = {}
+            return {}
 
     async def _load_market_state_async(self, all_symbols: set[str]):
         """Параллельно собирает котировки и тикает мониторинг."""
@@ -217,6 +282,15 @@ class AdvancedArbitrageEngine:
                 "⚠️ Часть тикеров временно недоступна и исключена из оценки: %s",
                 ", ".join(sorted(missing_symbols)),
             )
+
+        futures_symbols = self._collect_futures_symbols()
+        funding_rates = self._fetch_funding_rates(futures_symbols)
+        if funding_rates:
+            for symbol, funding in funding_rates.items():
+                if symbol in tickers:
+                    tickers[symbol]['funding_rate'] = funding.get('rate')
+                    tickers[symbol]['funding_interval_hours'] = funding.get('interval_hours')
+                    tickers[symbol]['next_funding_time'] = funding.get('next_funding_time')
 
         self.update_market_data(tickers)
         self.last_tickers = tickers
@@ -284,6 +358,7 @@ class AdvancedArbitrageEngine:
         self.ohlcv_history = {}
         self.last_strategy_context = {}
         self.last_tickers = {}
+        self.last_funding_rates = {}
         self._last_candidates = []
         self._last_market_analysis = {'market_conditions': 'normal', 'overall_volatility': 0}
         self.no_opportunity_cycles = 0
@@ -993,15 +1068,17 @@ class AdvancedArbitrageEngine:
                 # Выбираем лучшее направление и пересчитываем прибыль перед сравнением с динамическим порогом
                 best_direction = max(valid_directions, key=lambda x: x['profit_percent'])
                 recalculated_profit = best_direction['profit_percent']
+                recalculated_funding = best_direction.get('funding_details', [])
                 if best_direction.get('path'):
                     base_currency = triangle.get('base_currency', 'USDT')
-                    recalculated_profit = self._calculate_triangular_profit_path(
+                    recalculated_profit, recalculated_funding = self._calculate_triangular_profit_path(
                         prices,
                         best_direction['path'],
                         base_currency,
                         trade_amount=getattr(self.config, 'TRADE_AMOUNT', None)
                     )
                     best_direction['profit_percent'] = recalculated_profit
+                    best_direction['funding_details'] = recalculated_funding
                 self._last_candidates.append({
                     'triangle': triangle,
                     'triangle_name': triangle_name,
@@ -1018,6 +1095,10 @@ class AdvancedArbitrageEngine:
                         'symbols': triangle['legs'],
                         'prices': prices,
                         'execution_path': best_direction['path'],
+                        'funding': {
+                            'applied': best_direction.get('funding_details', []),
+                            'snapshot': self.last_funding_rates,
+                        },
                         'timestamp': datetime.now(),
                         'market_conditions': market_analysis['market_conditions'],
                         'market_volatility': market_analysis.get('overall_volatility', 0.0),
@@ -1033,13 +1114,24 @@ class AdvancedArbitrageEngine:
 
                     self.triangle_stats[triangle_name]['opportunities_found'] += 1
 
-                    logger.info(f"🔺 {triangle['name']} - Direction {best_direction['direction']} - "
-                              f"Profit: {best_direction['profit_percent']:.4f}% - "
-                              f"Market: {market_analysis['market_conditions']}")
-                    
-                    logger.info(f"🔺 {triangle_name} - Direction {best_direction['direction']} - "
-                              f"Profit: {best_direction['profit_percent']:.4f}% - "
-                              f"Market: {market_analysis['market_conditions']}")
+                    funding_effect = sum(item.get('adjustment', 0) for item in best_direction.get('funding_details', []))
+                    if best_direction.get('funding_details'):
+                        logger.info(
+                            "🔺 %s - Direction %s - Profit: %.4f%% - Market: %s - Фандинг скорректировал объём на %.6f",
+                            triangle_name,
+                            best_direction['direction'],
+                            best_direction['profit_percent'],
+                            market_analysis['market_conditions'],
+                            funding_effect,
+                        )
+                    else:
+                        logger.info(
+                            "🔺 %s - Direction %s - Profit: %.4f%% - Market: %s",
+                            triangle_name,
+                            best_direction['direction'],
+                            best_direction['profit_percent'],
+                            market_analysis['market_conditions'],
+                        )
 
                 else:
                     rejected_candidates += 1
@@ -1150,8 +1242,9 @@ class AdvancedArbitrageEngine:
 
         if not path:
             profit = -100
+            funding_details = []
         else:
-            profit = self._calculate_triangular_profit_path(
+            profit, funding_details = self._calculate_triangular_profit_path(
                 prices,
                 path,
                 base_currency,
@@ -1161,7 +1254,8 @@ class AdvancedArbitrageEngine:
         return {
             'direction': direction,
             'profit_percent': profit,
-            'path': path
+            'path': path,
+            'funding_details': funding_details,
         }
 
     def _prepare_direction_sequences(self, legs, direction):
@@ -1415,7 +1509,7 @@ class AdvancedArbitrageEngine:
         return symbol[:midpoint], symbol[midpoint:]
 
     def _calculate_triangular_profit_path(self, prices, path, base_currency, trade_amount=None):
-        """Расчет прибыли по пути с учётом доступных объёмов, комиссий и проскальзывания"""
+        """Расчет прибыли по пути с учётом доступных объёмов, комиссий, проскальзывания и фандинга"""
         try:
             fee_rate = getattr(self.config, 'TRADING_FEE', 0)
             slippage_buffer = getattr(self.config, 'SLIPPAGE_PROFIT_BUFFER', 0.02)
@@ -1424,6 +1518,9 @@ class AdvancedArbitrageEngine:
             current_asset = base_currency
             depth_levels = getattr(self.config, 'ORDERBOOK_DEPTH_LEVELS', 5)
             liquidity_threshold = float(getattr(self.config, 'TRADE_AMOUNT', initial_amount) or initial_amount)
+            funding_hold_hours = float(getattr(self.config, 'FUNDING_HOLD_HOURS', 1.0))
+            default_funding_interval = float(getattr(self.config, 'FUNDING_INTERVAL_HOURS', 8.0))
+            funding_details = []
 
             def _normalize_levels(levels):
                 """Нормализация уровней стакана в формат со стандартными ключами"""
@@ -1552,6 +1649,53 @@ class AdvancedArbitrageEngine:
                 symbol = step['symbol']
                 price_data = prices[symbol]
                 symbol_base, symbol_quote = self._get_symbol_currencies(symbol)
+                market_type = step.get('market_type')
+
+                def _apply_funding_adjustment(side, executed_base, price):
+                    """Корректирует текущий объём с учётом ожидаемого фандинга."""
+
+                    if not market_type or str(market_type).lower() == 'spot':
+                        return 0.0
+
+                    funding_info = self.last_funding_rates.get(symbol, {})
+                    rate = funding_info.get('rate')
+                    if rate is None:
+                        rate = price_data.get('funding_rate', 0.0)
+                    rate = self._safe_float(rate, 0.0)
+
+                    interval_hours = funding_info.get('interval_hours') or price_data.get('funding_interval_hours')
+                    interval_hours = self._safe_float(interval_hours, default_funding_interval)
+
+                    if rate == 0 or interval_hours <= 0 or funding_hold_hours <= 0:
+                        return 0.0
+
+                    funding_ratio = funding_hold_hours / interval_hours
+                    notional_quote = executed_base * price if price else 0.0
+
+                    if side == 'Buy':
+                        adjustment_base = executed_base * rate * funding_ratio
+                        funding_details.append({
+                            'symbol': symbol,
+                            'market_type': market_type,
+                            'position': 'long',
+                            'rate': rate,
+                            'interval_hours': interval_hours,
+                            'hold_hours': funding_hold_hours,
+                            'adjustment': -adjustment_base,
+                        })
+                        return -adjustment_base
+
+                    adjustment_quote = notional_quote * rate * funding_ratio
+                    funding_details.append({
+                        'symbol': symbol,
+                        'market_type': market_type,
+                        'position': 'short',
+                        'rate': rate,
+                        'interval_hours': interval_hours,
+                        'hold_hours': funding_hold_hours,
+                        'adjustment': adjustment_quote,
+                    })
+                    return adjustment_quote
 
                 if step['side'] == 'Buy':
                     if current_asset != symbol_quote:
@@ -1566,7 +1710,8 @@ class AdvancedArbitrageEngine:
                         return -100
 
                     quantity = acquired * (1 - fee_rate)
-                    current_amount = quantity
+                    funding_adj = _apply_funding_adjustment('Buy', quantity, price)
+                    current_amount = max(0.0, quantity + funding_adj)
                     current_asset = symbol_base
                 else:  # Sell
                     if current_asset != symbol_base:
@@ -1581,15 +1726,16 @@ class AdvancedArbitrageEngine:
                         return -100
 
                     proceeds = (executed_amount * price) * (1 - fee_rate)
-                    current_amount = proceeds
+                    funding_adj = _apply_funding_adjustment('Sell', executed_amount, price)
+                    current_amount = max(0.0, proceeds + funding_adj)
                     current_asset = symbol_quote
 
             profit_percent = ((current_amount - initial_amount) / initial_amount) * 100
-            return profit_percent
+            return profit_percent, funding_details
 
         except (ZeroDivisionError, ValueError) as e:
             logger.debug(f"Profit calculation error: {str(e)}")
-            return -100
+            return -100, []
 
     def _quick_triangle_liquidity_check(self, triangle, tickers):
         """Упрощенная проверка ликвидности на основе bid/ask и спреда"""

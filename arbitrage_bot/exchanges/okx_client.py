@@ -92,6 +92,12 @@ class OkxClient:
             logger.warning("Не удалось получить котировки OKX: %s", exc)
             return tickers
 
+    def get_funding_rates(self, symbols):
+        """Заглушка для фандинга OKX: возвращаем пустой словарь для совместимости."""
+
+        logger.debug("Запрос фандинга для OKX не реализован, возвращаем пустой ответ")
+        return {}
+
     def get_order_book(self, symbol, depth=5):
         """Запрашивает стакан для тикера OKX."""
 

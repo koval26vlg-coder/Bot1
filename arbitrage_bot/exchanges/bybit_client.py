@@ -803,6 +803,44 @@ class BybitClient:
 
         return tickers
 
+    def get_funding_rates(self, symbols):
+        """Получение актуальных ставок фандинга для переданных тикеров."""
+
+        rates = {}
+        if not symbols:
+            return rates
+
+        if not hasattr(self.session, 'get_funding_rate'):
+            logger.debug("Клиент Bybit не поддерживает запрос фандинга")
+            return rates
+
+        interval_hours = float(getattr(self.config, 'FUNDING_INTERVAL_HOURS', 8.0))
+
+        for symbol in symbols:
+            try:
+                response = self.session.get_funding_rate(symbol=symbol)
+                payload = response.get('result') if isinstance(response, dict) else None
+                if isinstance(payload, list):
+                    payload = payload[0] if payload else {}
+                elif payload is None:
+                    payload = response
+
+                if not isinstance(payload, dict):
+                    payload = {}
+
+                rate = payload.get('fundingRate') or payload.get('funding_rate')
+                next_time = payload.get('nextFundingTime') or payload.get('fundingTime')
+
+                rates[symbol] = {
+                    'rate': self._safe_float(rate, 0.0),
+                    'interval_hours': interval_hours,
+                    'next_funding_time': next_time,
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Не удалось получить фандинг для %s: %s", symbol, exc)
+
+        return rates
+
     def get_unavailable_symbols(self):
         """Возвращает текущее множество временно исключённых тикеров."""
 
