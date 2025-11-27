@@ -526,9 +526,20 @@ class Config:
 
     def _build_triangle_templates(self, available_symbols=None):
         """Создает список потенциальных треугольников, согласованный с реальными тикерами"""
-        dynamic_templates = self._build_dynamic_triangle_templates(available_symbols)
+        limit = getattr(self, "ACCELERATED_TRIANGLE_LIMIT", 0) or None
+        dynamic_templates = self._build_dynamic_triangle_templates(
+            available_symbols,
+            limit=limit,
+        )
 
         if dynamic_templates:
+            if limit and len(dynamic_templates) > limit:
+                logger.info(
+                    "Ограничиваем количество динамических треугольников до %s из %s",  # noqa: E501
+                    limit,
+                    len(dynamic_templates),
+                )
+                return dynamic_templates[:limit]
             return dynamic_templates
 
         # Фолбэк на статическую конфигурацию, если API недоступно или ничего не построено
@@ -544,7 +555,7 @@ class Config:
 
         return static_templates
 
-    def _build_dynamic_triangle_templates(self, available_symbols):
+    def _build_dynamic_triangle_templates(self, available_symbols, limit: int | None = None):
         """Генерация всех возможных треугольников на основе доступных инструментов"""
         if not available_symbols:
             return []
@@ -604,6 +615,13 @@ class Config:
                             'priority': priority
                         })
                         registered.add(combination_name)
+
+                        if limit and len(templates) >= limit:
+                            logger.debug(
+                                "Достигнут лимит ускоренного режима: %s треугольников",  # noqa: E501
+                                limit,
+                            )
+                            return templates
 
         return templates
 
