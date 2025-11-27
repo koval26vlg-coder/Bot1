@@ -2620,5 +2620,28 @@ class AdvancedArbitrageEngine:
 
         return True
 
+    def shutdown(self):
+        """Плавное завершение работы движка."""
+
+        logger.info("🔧 Начинаю завершение работы AdvancedArbitrageEngine...")
+
+        try:
+            if hasattr(self, 'client') and self.client:
+                logger.info("🔌 Закрываю вебсокет соединения...")
+                self.client.close()
+
+            if hasattr(self, '_price_cache'):
+                self._price_cache.clear()
+                logger.info("🧹 Очищен кэш цен")
+
+            if hasattr(self, '_monitoring_thread') and self._monitoring_thread:
+                logger.info("🧵 Останавливаю фоновые потоки...")
+                self._stop_monitoring = True
+
+            logger.info("✅ AdvancedArbitrageEngine успешно завершил работу")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при завершении работы: {str(e)}")
+
 
 __all__ = ["AdvancedArbitrageEngine"]

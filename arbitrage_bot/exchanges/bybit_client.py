@@ -541,8 +541,24 @@ class BybitClient:
             return
 
         try:
+            logger.info("🔌 Инициализация вебсокет подключений...")
+
+            import threading
+
+            def start_ws_with_timeout():
+                self.ws_manager.start(self.config.SYMBOLS)
+
             self.ws_manager = BybitWebSocketManager(self.config)
-            self.ws_manager.start(self.config.SYMBOLS)
+            ws_thread = threading.Thread(target=start_ws_with_timeout)
+            ws_thread.daemon = True
+            ws_thread.start()
+
+            ws_thread.join(timeout=30.0)
+
+            if ws_thread.is_alive():
+                logger.warning("⚠️ Вебсокет подключение занимает больше времени, чем ожидается...")
+            else:
+                logger.info("✅ Вебсокет подключения успешно установлены")
         except Exception as exc:
             logger.warning("Не удалось инициализировать WebSocket-стримы: %s", exc, exc_info=True)
             self.ws_manager = None
