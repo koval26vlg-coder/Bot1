@@ -42,6 +42,7 @@ python main.py --mode replay --replay-path data/bybit_ticks.csv --replay-speed 4
 ```
 
 Основные параметры:
+
 - `--mode` — `standard`, `aggressive`, `quick` или `replay`.
 - `--min-profit` — порог прибыли `MIN_TRIANGULAR_PROFIT`.
 - `--trade-amount` — сумма сделки для тестовых прогонов.
@@ -99,7 +100,7 @@ pip install -r requirements-ml.txt
 
 Для удобной работы со значениями API-ключей используется пакет `python-dotenv`. Создайте файл `.env` в корне проекта и пропишите, например:
 
-```
+```bash
 BYBIT_API_KEY="ваш_ключ"
 BYBIT_API_SECRET="ваш_секрет"
 TESTNET=True
