@@ -986,7 +986,7 @@ class BybitClient:
 
             # В тестнете не выполняем реальные ордера, только имитируем
             if self.config.TESTNET:
-                logger.info(f"🧪 TESTNET MODE: Simulating order execution (no real order placed)")
+                logger.info("🧪 TESTNET MODE: Simulating order execution (no real order placed)")
                 return {
                     'orderId': f"test_order_{int(time.time())}",
                     'orderStatus': 'Filled',
