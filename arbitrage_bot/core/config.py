@@ -3,6 +3,9 @@ import os
 import sys
 import time
 
+from concurrent.futures import ThreadPoolExecutor
+from itertools import product
+
 import requests
 from dotenv import load_dotenv
 from logging_utils import (
@@ -68,6 +71,7 @@ class Config:
         self._triangles_last_update = None
         self._okx_symbol_map = {}
         self._symbol_details_map = {}
+        self._symbol_market_source = {}
         self._market_category_override = os.getenv('MARKET_CATEGORY_OVERRIDE')
         self._auto_detect_market_category = os.getenv('AUTO_DETECT_MARKET_CATEGORY', 'true').lower() == 'true'
         self._enable_spot_in_testnet = os.getenv('TESTNET_SPOT_ENABLED', 'false').lower() == 'true'
@@ -138,23 +142,31 @@ class Config:
     def MARKET_CATEGORY(self):
         """Возвращает тип сегмента рынка с учётом среды и арбитражных тикеров."""
 
+        return self.MARKET_CATEGORIES[0]
+
+    @property
+    def MARKET_CATEGORIES(self):
+        """Перечень приоритетных сегментов рынка (spot + фьючерсы)"""
+
         if self._market_category_override:
-            return self._market_category_override
+            return [self._market_category_override]
 
         prefers_spot = self._arbitrage_market_hint == 'spot' or self._enable_spot_in_testnet
+
+        ordered = ['spot', 'linear'] if prefers_spot else ['linear', 'spot']
 
         if self.TESTNET:
             if self._auto_detect_market_category:
                 detected = self._detect_testnet_market_category(prefers_spot)
                 if detected:
-                    return detected
+                    ordered = [detected] + [cat for cat in ordered if cat != detected]
 
-            if prefers_spot:
-                return 'spot'
+            if not self._enable_spot_in_testnet:
+                ordered = [cat for cat in ordered if cat != 'spot'] + (
+                    ['spot'] if prefers_spot else []
+                )
 
-            return 'linear'
-
-        return 'spot'
+        return list(dict.fromkeys(ordered))
 
     @property
     def API_BASE_URL(self):
@@ -302,6 +314,7 @@ class Config:
         self._symbol_watchlist_cache = None
         self._triangular_pairs_cache = None
         self._triangles_last_update = None
+        self._symbol_market_source = {}
     
     @property
     def MIN_TRIANGULAR_PROFIT(self):
@@ -560,31 +573,37 @@ class Config:
                     if secondary_asset in {primary_asset, base_currency}:
                         continue
 
-                    legs = self._resolve_triangle_legs(
+                    leg_options = self._collect_leg_combinations(
                         base_currency,
                         primary_asset,
                         secondary_asset,
-                        available_symbols
+                        available_symbols,
                     )
-                    if not legs:
+                    if not leg_options:
                         continue
 
                     triangle_name = f'{base_currency}-{primary_asset}-{secondary_asset}-{base_currency}'
-                    if triangle_name in registered:
-                        continue
+                    for legs, leg_types in leg_options:
+                        combination_name = f"{triangle_name}|{'-'.join(legs)}|{'-'.join(leg_types)}"
+                        if combination_name in registered:
+                            continue
 
-                    priority = min(
-                        self.TRIANGLE_BASES.get(primary_asset, 5),
-                        self.TRIANGLE_BASES.get(secondary_asset, 5)
-                    )
+                        priority = min(
+                            self.TRIANGLE_BASES.get(primary_asset, 5),
+                            self.TRIANGLE_BASES.get(secondary_asset, 5)
+                        )
 
-                    templates.append({
-                        'name': triangle_name,
-                        'legs': legs,
-                        'base_currency': base_currency,
-                        'priority': priority
-                    })
-                    registered.add(triangle_name)
+                        leg_type_map = {leg: leg_type for leg, leg_type in zip(legs, leg_types)}
+
+                        templates.append({
+                            'name': triangle_name,
+                            'legs': legs,
+                            'leg_types': leg_types,
+                            'leg_type_map': leg_type_map,
+                            'base_currency': base_currency,
+                            'priority': priority
+                        })
+                        registered.add(combination_name)
 
         return templates
 
@@ -594,12 +613,16 @@ class Config:
             {
                 'name': 'USDT-BTC-ETH-USDT',
                 'legs': ['BTCUSDT', 'ETHBTC', 'ETHUSDT'],
+                'leg_types': ['spot', 'spot', 'spot'],
+                'leg_type_map': {'BTCUSDT': 'spot', 'ETHBTC': 'spot', 'ETHUSDT': 'spot'},
                 'base_currency': 'USDT',
                 'priority': 1
             },
             {
                 'name': 'USDT-ETH-BTC-USDT',
                 'legs': ['ETHUSDT', 'ETHBTC', 'BTCUSDT'],
+                'leg_types': ['spot', 'spot', 'spot'],
+                'leg_type_map': {'ETHUSDT': 'spot', 'ETHBTC': 'spot', 'BTCUSDT': 'spot'},
                 'base_currency': 'USDT',
                 'priority': 1
             }
@@ -612,12 +635,24 @@ class Config:
             templates.append({
                 'name': f'USDT-{asset}-BTC-USDT',
                 'legs': [f'{asset}USDT', f'{asset}BTC', 'BTCUSDT'],
+                'leg_types': ['spot', 'spot', 'spot'],
+                'leg_type_map': {
+                    f'{asset}USDT': 'spot',
+                    f'{asset}BTC': 'spot',
+                    'BTCUSDT': 'spot'
+                },
                 'base_currency': 'USDT',
                 'priority': priority
             })
             templates.append({
                 'name': f'USDT-{asset}-ETH-USDT',
                 'legs': [f'{asset}USDT', f'{asset}ETH', 'ETHUSDT'],
+                'leg_types': ['spot', 'spot', 'spot'],
+                'leg_type_map': {
+                    f'{asset}USDT': 'spot',
+                    f'{asset}ETH': 'spot',
+                    'ETHUSDT': 'spot'
+                },
                 'base_currency': 'USDT',
                 'priority': priority
             })
@@ -681,22 +716,77 @@ class Config:
         connected.discard(anchor_currency)
         return connected
 
+    def _collect_leg_combinations(self, base_currency, primary_asset, secondary_asset, available_symbols):
+        """Комбинирует все варианты ног для гибридных треугольников."""
+
+        leg1_options = self._resolve_market_leg_options(primary_asset, base_currency, available_symbols)
+        leg2_options = self._resolve_market_leg_options(secondary_asset, primary_asset, available_symbols)
+        leg3_options = self._resolve_market_leg_options(secondary_asset, base_currency, available_symbols)
+
+        if not leg1_options or not leg2_options or not leg3_options:
+            return []
+
+        combinations = []
+        registered = set()
+
+        for leg1, leg2, leg3 in product(leg1_options, leg2_options, leg3_options):
+            legs = [leg1[0], leg2[0], leg3[0]]
+            leg_types = [leg1[1], leg2[1], leg3[1]]
+            key = tuple(legs + leg_types)
+            if key in registered:
+                continue
+
+            combinations.append((legs, leg_types))
+            registered.add(key)
+
+        return combinations
+
     def _resolve_triangle_legs(self, base_currency, primary_asset, secondary_asset, available_symbols):
-        """Подбирает реальные тикеры для треугольника Base -> Primary -> Secondary -> Base"""
-        legs = []
-        currency_pairs = [
-            (primary_asset, base_currency),
-            (secondary_asset, primary_asset),
-            (secondary_asset, base_currency)
-        ]
+        """Подбирает первую доступную комбинацию тикеров (для обратной совместимости)."""
 
-        for base, quote in currency_pairs:
-            symbol = self._resolve_market_symbol(base, quote, available_symbols)
-            if not symbol:
-                return None
-            legs.append(symbol)
+        combinations = self._collect_leg_combinations(
+            base_currency,
+            primary_asset,
+            secondary_asset,
+            available_symbols,
+        )
 
-        return legs
+        if not combinations:
+            return None
+
+        return combinations[0][0]
+
+    def _resolve_market_leg_options(self, base_currency, quote_currency, available_symbols):
+        """Возвращает все тикеры между двумя валютами с указанием сегмента рынка."""
+
+        normalized_available = {symbol.upper() for symbol in available_symbols}
+        options = []
+        target_pairs = {
+            (base_currency.upper(), quote_currency.upper()),
+            (quote_currency.upper(), base_currency.upper()),
+        }
+
+        for symbol in normalized_available:
+            base_coin, quote_coin = self._symbol_details_map.get(symbol, (None, None))
+            if not base_coin or not quote_coin:
+                base_coin, quote_coin = self._split_symbol(symbol)
+
+            if not base_coin or not quote_coin:
+                continue
+
+            if (base_coin, quote_coin) not in target_pairs and (quote_coin, base_coin) not in target_pairs:
+                continue
+
+            market_types = self._symbol_market_source.get(symbol)
+            if not market_types:
+                market_types = {self.MARKET_CATEGORY}
+            if isinstance(market_types, str):
+                market_types = {market_types}
+
+            for market_type in market_types:
+                options.append((symbol, market_type))
+
+        return options
 
     def _resolve_market_symbol(self, base_currency, quote_currency, available_symbols):
         """Находит фактический тикер между двумя валютами в любой ориентации"""
@@ -720,15 +810,48 @@ class Config:
         if self.PRIMARY_EXCHANGE == 'okx':
             return self._fetch_okx_market_symbols()
 
-        url = f"{self.API_BASE_URL}/v5/market/instruments-info"
-        params = {'category': self.MARKET_CATEGORY}
+        categories = self.MARKET_CATEGORIES
+        aggregated_symbols: list[str] = []
+        aggregated_details: dict[str, tuple[str, str]] = {}
+        aggregated_sources: dict[str, set[str]] = {}
 
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            if data.get('retCode') == 0:
-                self._symbol_details_map = {}
+        def _resolve_api_base(category: str) -> str:
+            if self.PRIMARY_EXCHANGE == 'okx':
+                return self.API_BASE_URL
+            if self.TESTNET:
+                if category == 'spot' and self._enable_spot_in_testnet:
+                    return self._testnet_spot_api_base
+                return 'https://api-testnet.bybit.com'
+            return 'https://api.bybit.com'
+
+        def _load_category_symbols(category: str):
+            url = f"{_resolve_api_base(category)}/v5/market/instruments-info"
+            params = {'category': category}
+            try:
+                response = requests.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                return category, response.json()
+            except requests.RequestException as exc:
+                logger.warning(
+                    "Не удалось получить инструменты Bybit (%s): %s", category, exc
+                )
+                return category, None
+
+        with ThreadPoolExecutor(max_workers=len(categories)) as executor:
+            futures = [executor.submit(_load_category_symbols, category) for category in categories]
+            for future in futures:
+                category, data = future.result()
+                if not data:
+                    continue
+                if data.get('retCode') != 0:
+                    logger.warning(
+                        "REST ответил кодом %s для %s: %s",
+                        data.get('retCode'),
+                        category,
+                        data.get('retMsg'),
+                    )
+                    continue
+
                 detailed_symbols = {}
                 market_entries = []
 
@@ -755,29 +878,26 @@ class Config:
                 limit = self._market_symbols_limit if self._market_symbols_limit > 0 else None
                 selected_entries = market_entries if limit is None else market_entries[:limit]
 
-                self._available_symbols_cache = [symbol for symbol, _ in selected_entries]
-                self._symbol_details_map = {
+                aggregated_symbols.extend(symbol for symbol, _ in selected_entries)
+                aggregated_details.update({
                     symbol: detailed_symbols.get(symbol)
                     for symbol, _ in selected_entries
                     if detailed_symbols.get(symbol)
-                }
+                })
+                for symbol, _ in selected_entries:
+                    aggregated_sources.setdefault(symbol, set()).add(category)
+
                 logger.info(
                     "Получено %s тикеров для категории %s (ограничение %s)",
-                    len(self._available_symbols_cache),
-                    self.MARKET_CATEGORY,
+                    len(selected_entries),
+                    category,
                     limit if limit is not None else 'без ограничений',
                 )
-                return self._available_symbols_cache
 
-            logger.warning(
-                "REST ответил кодом %s: %s", data.get('retCode'), data.get('retMsg')
-            )
-        except requests.RequestException as exc:
-            logger.warning(
-                "Не удалось получить инструменты Bybit (%s): %s", self.MARKET_CATEGORY, exc
-            )
+        self._available_symbols_cache = list(dict.fromkeys(aggregated_symbols))
+        self._symbol_details_map = aggregated_details
+        self._symbol_market_source = aggregated_sources
 
-        self._available_symbols_cache = []
         return self._available_symbols_cache
 
     def _fetch_okx_market_symbols(self):

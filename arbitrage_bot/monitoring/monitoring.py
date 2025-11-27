@@ -7,6 +7,7 @@ import statistics
 from datetime import datetime
 import asyncio
 import importlib.util
+from collections import Counter
 
 psutil = None
 if importlib.util.find_spec('psutil') is not None:
@@ -200,6 +201,13 @@ class AdvancedMonitor:
     
     def track_trade(self, trade_data):
         """Отслеживание сделки"""
+        execution_path = (trade_data.get('details') or {}).get('execution_path')
+        if isinstance(execution_path, list):
+            market_types = [step.get('market_type') for step in execution_path if isinstance(step, dict)]
+            filtered_types = [m for m in market_types if m]
+            if filtered_types:
+                trade_data['market_mix'] = dict(Counter(filtered_types))
+
         self.trade_history.append(trade_data)
         
         # Очистка старых данных (хранить только последние 1000 сделок)

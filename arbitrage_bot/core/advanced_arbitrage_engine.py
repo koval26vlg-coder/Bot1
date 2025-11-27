@@ -315,6 +315,19 @@ class AdvancedArbitrageEngine:
             logger.error("❌ Конфигурация не содержит треугольников для арбитража")
             is_valid = False
 
+        for triangle in cfg.TRIANGULAR_PAIRS or []:
+            legs = triangle.get('legs', [])
+            leg_types = triangle.get('leg_types') or ['spot'] * len(legs)
+            if len(legs) != len(leg_types):
+                logger.warning(
+                    "⚠️ Треугольник %s имеет несогласованные ног/типов (%s против %s)",
+                    triangle.get('name'),
+                    len(legs),
+                    len(leg_types),
+                )
+            if not triangle.get('leg_type_map'):
+                triangle['leg_type_map'] = {leg: leg_type for leg, leg_type in zip(legs, leg_types)}
+
         if getattr(cfg, 'MIN_TRIANGULAR_PROFIT', 0) <= 0:
             logger.warning(
                 "⚠️ MIN_TRIANGULAR_PROFIT должен быть положительным. Текущее значение: %s", cfg.MIN_TRIANGULAR_PROFIT
@@ -1112,6 +1125,13 @@ class AdvancedArbitrageEngine:
         """Расчет прибыли для конкретного направления"""
         leg1, leg2, leg3 = triangle['legs']
         base_currency = triangle.get('base_currency', 'USDT')
+        leg_type_map = triangle.get('leg_type_map') or {
+            leg: leg_type
+            for leg, leg_type in zip(
+                triangle.get('legs', []),
+                triangle.get('leg_types', ['spot'] * len(triangle.get('legs', [])))
+            )
+        }
 
         direction_sequences = self._prepare_direction_sequences([leg1, leg2, leg3], direction)
         path = None
@@ -1121,9 +1141,10 @@ class AdvancedArbitrageEngine:
                 sequence,
                 base_currency,
                 triangle.get('name', 'unknown'),
-                direction
+                direction,
+                leg_type_map,
             )
-            if path and self.validate_triangle_path(path, base_currency):
+            if path and self.validate_triangle_path(path, base_currency, leg_type_map):
                 break
             path = None
 
@@ -1163,7 +1184,7 @@ class AdvancedArbitrageEngine:
                 unique_sequences.append(perm_list)
         return unique_sequences
 
-    def validate_triangle_path(self, path, base_currency):
+    def validate_triangle_path(self, path, base_currency, leg_type_map=None):
         """Проверка корректности построенного треугольного пути."""
 
         if not path or len(path) != 3:
@@ -1179,6 +1200,7 @@ class AdvancedArbitrageEngine:
         for index, step in enumerate(path, start=1):
             symbol = step.get('symbol')
             side = step.get('side')
+            market_type = step.get('market_type', leg_type_map.get(symbol) if leg_type_map else None)
 
             if not symbol or side not in {'Buy', 'Sell'}:
                 logger.warning(
@@ -1220,6 +1242,15 @@ class AdvancedArbitrageEngine:
                     return False
                 current_asset = quote_cur
 
+            if leg_type_map and market_type and leg_type_map.get(symbol) != market_type:
+                logger.debug(
+                    "Шаг %s имеет тип рынка %s, ожидается %s для %s",
+                    index,
+                    market_type,
+                    leg_type_map.get(symbol),
+                    symbol,
+                )
+
         if current_asset != base_currency:
             logger.warning(
                 "Путь отклонен: цикл не возвращается к базовой валюте %s (текущая %s)",
@@ -1230,7 +1261,7 @@ class AdvancedArbitrageEngine:
 
         return True
 
-    def _build_universal_path(self, legs_sequence, base_currency, triangle_name, direction):
+    def _build_universal_path(self, legs_sequence, base_currency, triangle_name, direction, leg_type_map=None):
         """Универсальное построение пути на основе текущей валюты"""
         current_asset = base_currency
         path = []
@@ -1249,8 +1280,17 @@ class AdvancedArbitrageEngine:
                     f"Текущая валюта: {current_asset}, рассматриваем символ {symbol}"
                 )
 
+                market_type = None
+                if leg_type_map:
+                    market_type = leg_type_map.get(symbol)
+
                 if current_asset == quote_cur:
-                    path.append({'symbol': symbol, 'side': 'Buy', 'price_type': 'ask'})
+                    path.append({
+                        'symbol': symbol,
+                        'side': 'Buy',
+                        'price_type': 'ask',
+                        'market_type': market_type,
+                    })
                     current_asset = base_cur
                     remaining_symbols.remove(symbol)
                     step_found = True
@@ -1259,7 +1299,12 @@ class AdvancedArbitrageEngine:
                     )
                     break
                 if current_asset == base_cur:
-                    path.append({'symbol': symbol, 'side': 'Sell', 'price_type': 'bid'})
+                    path.append({
+                        'symbol': symbol,
+                        'side': 'Sell',
+                        'price_type': 'bid',
+                        'market_type': market_type,
+                    })
                     current_asset = quote_cur
                     remaining_symbols.remove(symbol)
                     step_found = True
@@ -1294,7 +1339,8 @@ class AdvancedArbitrageEngine:
                     path.append({
                         'symbol': fallback_symbol,
                         'side': fallback_side,
-                        'price_type': 'bid' if fallback_side == 'Sell' else 'ask'
+                        'price_type': 'bid' if fallback_side == 'Sell' else 'ask',
+                        'market_type': leg_type_map.get(fallback_symbol) if leg_type_map else None,
                     })
                     remaining_symbols.remove(fallback_symbol)
                     current_asset = fallback_next_asset
