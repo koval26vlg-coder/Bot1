@@ -113,7 +113,7 @@ python -m pytest
 pip install -r requirements-ml.txt
 ```
 
-Если `scikit-learn` не установлен или несовместим, бот автоматически залогирует предупреждение и продолжит работу с фолбэк-порогом `ML_FALLBACK_THRESHOLD`/`MIN_TRIANGULAR_PROFIT` без аварийного завершения CLI.
+Если `scikit-learn` недоступен, бот переключится на встроенный чисто-Python бэкэнд, создаст базовую модель по пути `ML_MODEL_PATH` и продолжит работу с порогом `ML_FALLBACK_THRESHOLD`/`MIN_TRIANGULAR_PROFIT` без предупреждений о фолбэке.
 
 ### Переменные окружения
 
