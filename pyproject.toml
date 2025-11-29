@@ -20,11 +20,6 @@ dependencies = [
     "aiohttp==3.10.5",
 ]
 
-[project.optional-dependencies]
-test = [
-    "pytest==8.4.2",
-]
-
 [tool.setuptools]
 py-modules = [
     "main",
