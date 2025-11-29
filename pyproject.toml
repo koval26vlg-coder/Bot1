@@ -27,9 +27,7 @@ test = [
 
 [tool.setuptools]
 py-modules = [
-    "logging_utils",
     "main",
-    "ml_profit_optimizer",
 ]
 
 [tool.setuptools.packages.find]
