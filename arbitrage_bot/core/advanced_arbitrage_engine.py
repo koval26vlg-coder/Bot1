@@ -13,7 +13,7 @@ from arbitrage_bot.core.config import Config
 from arbitrage_bot.core.real_trading import RealTradingExecutor
 from arbitrage_bot.exchanges.bybit_client import BybitClient
 from arbitrage_bot.exchanges.okx_client import OkxClient
-from arbitrage_bot.monitoring.monitoring import AdvancedMonitor
+from arbitrage_bot.monitoring import AdvancedMonitor
 from arbitrage_bot.strategies.indicator_strategies import StrategyManager
 from arbitrage_bot.utils.math_stats import mean, rolling_mean
 from arbitrage_bot.utils.performance_optimizer import PerformanceOptimizer
