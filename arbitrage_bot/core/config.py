@@ -366,10 +366,9 @@ class Config:
                 else:
                     mismatched.append(symbol)
             else:
+                filtered.append(symbol)
                 if market_category == 'spot':
                     missing_category.append(symbol)
-                else:
-                    filtered.append(symbol)
 
         dropped_total = len(mismatched) + len(missing_category)
         if dropped_total:
