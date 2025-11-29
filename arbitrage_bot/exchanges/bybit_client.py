@@ -39,6 +39,9 @@ class BybitWebSocketManager:
         self._stop_event = threading.Event()
         self._monitor_thread = None
         self._last_ticker_ts = 0
+        self._private_ws_failures = 0
+        self._max_private_ws_failures = getattr(self.config, "PRIVATE_WS_MAX_FAILURES", 3)
+        self._private_ws_disabled = False
         self._max_staleness = max(
             getattr(self.config, 'TICKER_STALENESS_WARNING_SEC', 5.0) * 2,
             1.0,
@@ -151,13 +154,35 @@ class BybitWebSocketManager:
                     self._restart_public_ws()
 
                 private_alive = self._is_ws_active(self._private_ws)
-                if self._order_listeners and (self._private_ws is None or not private_alive):
-                    if self._private_ws is None or not private_alive:
-                        logger.debug("Обнаружено закрытое приватное подключение, инициируем переподключение")
-                        self._shutdown_ws(self._private_ws)
-                        self._private_ws = None
-                    logger.debug("Переподключение приватного стрима ордеров")
-                    self._connect_private_ws()
+                if self._order_listeners:
+                    if self._private_ws_disabled:
+                        logger.debug(
+                            "Приватный WebSocket отключён из-за предыдущих ошибок авторизации"
+                        )
+                    elif self._private_ws is None or not private_alive:
+                        self._private_ws_failures += 1
+
+                        if self._private_ws_failures > self._max_private_ws_failures:
+                            logger.error(
+                                "Приватный WebSocket отключён после %s неудачных попыток. "
+                                "Проверьте корректность API-ключей и синхронизацию времени.",
+                                self._max_private_ws_failures,
+                            )
+                            self._shutdown_ws(self._private_ws)
+                            self._private_ws = None
+                            self._private_ws_disabled = True
+                            continue
+
+                        if self._private_ws is None or not private_alive:
+                            logger.debug(
+                                "Обнаружено закрытое приватное подключение, инициируем переподключение"
+                            )
+                            self._shutdown_ws(self._private_ws)
+                            self._private_ws = None
+                        logger.debug("Переподключение приватного стрима ордеров")
+                        self._connect_private_ws()
+                    else:
+                        self._private_ws_failures = 0
             except Exception as exc:
                 logger.warning("Ошибка мониторинга WebSocket: %s", exc)
 
@@ -262,6 +287,10 @@ class BybitWebSocketManager:
             logger.warning("API ключи не заданы, пропускаем подписку на приватные события")
             return
 
+        if self._private_ws_disabled:
+            logger.debug("Приватный WebSocket отключён, пропускаем переподключение")
+            return
+
         try:
             self._private_ws = WebSocket(
                 channel_type="private",
@@ -271,6 +300,14 @@ class BybitWebSocketManager:
             )
             self._private_ws.order_stream(callback=self._handle_order)
             logger.info("🔔 WebSocket ордеров активирован")
+
+            if not self._is_ws_active(self._private_ws):
+                self._private_ws_failures += 1
+                logger.warning(
+                    "Не удалось подтвердить активность приватного WebSocket сразу после подключения"
+                )
+            else:
+                self._private_ws_failures = 0
         except Exception as exc:
             logger.warning("Не удалось подключиться к приватному стриму ордеров: %s", exc)
             self._private_ws = None
