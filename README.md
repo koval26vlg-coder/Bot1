@@ -12,7 +12,7 @@
 - `arbitrage_bot/strategies/indicator_strategies.py` — набор индикаторов и фильтров для сигналов.
 - `arbitrage_bot/core/real_trading.py` — исполнение сделок и расчёт параметров ордеров.
 - `arbitrage_bot/utils/performance_optimizer.py` — оптимизация параметров и профилирование циклов.
-- `arbitrage_bot/monitoring/monitoring.py` — сбор системных метрик и экспорт состояния.
+- `arbitrage_bot/monitoring.py` — сбор системных метрик, дашборд и экспорт состояния.
 - `arbitrage_bot/utils/math_stats.py` — статистические утилиты для анализа данных.
 - `requirements.txt` — список необходимых зависимостей.
 
