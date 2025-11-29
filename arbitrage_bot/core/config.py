@@ -153,16 +153,21 @@ class Config:
             return [self._market_category_override]
 
         prefers_spot = self._arbitrage_market_hint == 'spot' or self._enable_spot_in_testnet
+        detected_category = None
 
         ordered = ['spot', 'linear'] if prefers_spot else ['linear', 'spot']
 
         if self.TESTNET:
             if self._auto_detect_market_category:
-                detected = self._detect_testnet_market_category(prefers_spot)
-                if detected:
-                    ordered = [detected] + [cat for cat in ordered if cat != detected]
+                detected_category = self._detect_testnet_market_category(prefers_spot)
+                if detected_category:
+                    ordered = [detected_category] + [cat for cat in ordered if cat != detected_category]
 
-            if not self._enable_spot_in_testnet:
+            if (
+                not self._enable_spot_in_testnet
+                and not prefers_spot
+                and detected_category != 'spot'
+            ):
                 ordered = [cat for cat in ordered if cat != 'spot'] + (
                     ['spot'] if prefers_spot else []
                 )
@@ -243,11 +248,29 @@ class Config:
             for triangle in self.TRIANGULAR_PAIRS:
                 triangle_legs.update(triangle['legs'])
 
+            missing_triangle_legs = []
+
             for leg in sorted(triangle_legs):
                 if available_symbols and leg not in available_symbols:
+                    missing_triangle_legs.append(leg)
                     continue
                 if leg not in watchlist:
                     watchlist.append(leg)
+
+            if available_symbols and len(available_symbols) < 3:
+                logger.warning(
+                    "Получено слишком мало символов (%s) для построения треугольников. "
+                    "Добавляем обязательные ноги и базовый список по умолчанию.",
+                    len(available_symbols),
+                )
+
+                for leg in sorted(missing_triangle_legs):
+                    if leg not in watchlist:
+                        watchlist.append(leg)
+
+                for default_symbol in self.DEFAULT_SYMBOLS:
+                    if default_symbol not in watchlist:
+                        watchlist.append(default_symbol)
 
             self._symbol_watchlist_cache = watchlist
         return self._symbol_watchlist_cache
