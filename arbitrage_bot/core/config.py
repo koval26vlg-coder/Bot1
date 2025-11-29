@@ -272,7 +272,7 @@ class Config:
                     if default_symbol not in watchlist:
                         watchlist.append(default_symbol)
 
-            self._symbol_watchlist_cache = watchlist
+            self._symbol_watchlist_cache = self._filter_symbols_by_market_category(watchlist)
         return self._symbol_watchlist_cache
 
     @property
@@ -338,6 +338,39 @@ class Config:
         self._symbol_watchlist_cache = None
         self._triangular_pairs_cache = None
         self._triangles_last_update = None
+
+    def _filter_symbols_by_market_category(self, symbols: list[str]) -> list[str]:
+        """Фильтрует тикеры по текущему сегменту рынка с учётом источника."""
+
+        market_category = self.MARKET_CATEGORY
+        filtered: list[str] = []
+        mismatched: list[str] = []
+        missing_category: list[str] = []
+
+        for symbol in symbols:
+            sources = self._symbol_market_source.get(symbol)
+            if sources:
+                if market_category in sources:
+                    filtered.append(symbol)
+                else:
+                    mismatched.append(symbol)
+            else:
+                if market_category == 'spot':
+                    missing_category.append(symbol)
+                else:
+                    filtered.append(symbol)
+
+        dropped_total = len(mismatched) + len(missing_category)
+        if dropped_total:
+            logger.info(
+                "Отброшено %s тикеров из-за несоответствия категории %s (без данных: %s). Итоговый список: %s",
+                dropped_total,
+                market_category,
+                len(missing_category),
+                len(filtered),
+            )
+
+        return filtered
         self._symbol_market_source = {}
     
     @property
