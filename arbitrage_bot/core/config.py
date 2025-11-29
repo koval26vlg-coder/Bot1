@@ -119,6 +119,7 @@ class Config:
             'true',
         ).lower() == 'true'
         self._market_symbols_limit = self._load_int_env('MARKET_SYMBOLS_LIMIT', 100)
+        self.PRIVATE_WS_MAX_FAILURES = self._load_int_env('PRIVATE_WS_MAX_FAILURES', 3)
         # Длительность кэша для треугольников (в секундах)
         self._triangles_cache_ttl = 60
         self.WEBSOCKET_PRICE_ONLY = os.getenv('WEBSOCKET_PRICE_ONLY', 'false').lower() == 'true'
