@@ -34,6 +34,7 @@ class BybitWebSocketManager:
         self._public_ws = None
         self._private_ws = None
         self._symbols = set()
+        self._symbol_batches: list[list[str]] = []
         self._order_listeners = []
         self._stop_event = threading.Event()
         self._monitor_thread = None
@@ -48,7 +49,28 @@ class BybitWebSocketManager:
     def start(self, symbols):
         """Запуск стримов по списку тикеров."""
 
-        self._symbols = set(symbols)
+        limit = getattr(self.config, "MARKET_SYMBOLS_LIMIT", getattr(self.config, "_market_symbols_limit", 0))
+        unique_symbols = list(dict.fromkeys(symbols))
+
+        if limit and len(unique_symbols) > limit:
+            logger.warning(
+                "Список тикеров для WebSocket урезан с %s до лимита %s",
+                len(unique_symbols),
+                limit,
+            )
+            unique_symbols = unique_symbols[:limit]
+
+        if not unique_symbols:
+            logger.info("Нет символов для подписки на публичный стрим котировок")
+            return
+
+        batch_size = limit if limit else len(unique_symbols)
+        batch_size = max(batch_size, 1)
+
+        self._symbol_batches = [
+            unique_symbols[i : i + batch_size] for i in range(0, len(unique_symbols), batch_size)
+        ]
+        self._symbols = set(unique_symbols)
         self._connect_public_ws()
         self._ensure_monitor()
 
@@ -171,13 +193,15 @@ class BybitWebSocketManager:
             logger.warning("pybit не установлен, WebSocket котировок недоступен")
             return
 
-        symbols = list(self._symbols)
-        if not symbols:
+        symbol_groups = self._symbol_batches if self._symbol_batches else [list(self._symbols)]
+        total_symbols = sum(len(group) for group in symbol_groups)
+
+        if not total_symbols:
             logger.info("Нет символов для подписки на публичный стрим котировок")
             return
 
-        batch_size = 10
-        symbol_batches = [symbols[i : i + batch_size] for i in range(0, len(symbols), batch_size)]
+        limit = getattr(self.config, "MARKET_SYMBOLS_LIMIT", getattr(self.config, "_market_symbols_limit", 0))
+        batch_size = 10 if not limit else min(10, max(limit, 1))
 
         try:
             self._public_ws = WebSocket(
@@ -186,18 +210,34 @@ class BybitWebSocketManager:
                 api_key=self.config.API_KEY,
                 api_secret=self.config.API_SECRET,
             )
+            total_batches = 0
+
+            for group_idx, group in enumerate(symbol_groups, start=1):
+                symbol_batches = [group[i : i + batch_size] for i in range(0, len(group), batch_size)]
+                total_batches += len(symbol_batches)
+                logger.debug(
+                    "Группа %s: %s тикеров разбиты на %s пакетов подписки",
+                    group_idx,
+                    len(group),
+                    len(symbol_batches),
+                )
+
+                for idx, batch in enumerate(symbol_batches, start=1):
+                    logger.debug(
+                        "Подписка на пакет %s.%s/%s: %s",
+                        group_idx,
+                        idx,
+                        len(symbol_batches),
+                        batch,
+                    )
+                    self._public_ws.ticker_stream(symbol=batch, callback=self._handle_ticker)
+                    self._last_ticker_ts = time.time()
+
             logger.info(
-                "Подготовлено %s пакетов подписки на котировки для %s символов",
-                len(symbol_batches),
-                len(symbols),
+                "📡 WebSocket котировок запущен для %s символов (%s пакетов)",
+                total_symbols,
+                total_batches,
             )
-
-            for idx, batch in enumerate(symbol_batches, start=1):
-                logger.debug("Подписка на пакет %s/%s: %s", idx, len(symbol_batches), batch)
-                self._public_ws.ticker_stream(symbol=batch, callback=self._handle_ticker)
-                self._last_ticker_ts = time.time()
-
-            logger.info("📡 WebSocket котировок запущен для %s символов", len(symbols))
         except Exception as exc:
             logger.warning("Не удалось подключиться к публичному стриму котировок: %s", exc)
             self._public_ws = None
