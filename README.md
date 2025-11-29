@@ -16,6 +16,8 @@
 - `arbitrage_bot/utils/math_stats.py` — статистические утилиты для анализа данных.
 - `requirements.txt` — список необходимых зависимостей.
 
+Устаревшие совместимые импорты верхнего уровня (`bybit_client.py`, `async_bybit_client.py`, `config.py`, `bot_bundle.py`) удалены: используйте полноценные пути из пакета `arbitrage_bot`, например `arbitrage_bot.exchanges.bybit_client` или `arbitrage_bot.core.async_bybit_client`.
+
 ## Режимы запуска через CLI
 
 `main.py` предоставляет три режима работы, переключаемые через параметр `--mode`:
