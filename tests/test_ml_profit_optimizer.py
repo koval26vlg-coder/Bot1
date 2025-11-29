@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from ml_profit_optimizer import MLProfitOptimizer
+from arbitrage_bot.utils.ml_profit_optimizer import MLProfitOptimizer
 
 
 class MLProfitOptimizerTests(unittest.TestCase):

@@ -17,7 +17,7 @@ from arbitrage_bot.monitoring import AdvancedMonitor
 from arbitrage_bot.strategies.indicator_strategies import StrategyManager
 from arbitrage_bot.utils.math_stats import mean, rolling_mean
 from arbitrage_bot.utils.performance_optimizer import PerformanceOptimizer
-from ml_profit_optimizer import MLProfitOptimizer
+from arbitrage_bot.utils.ml_profit_optimizer import MLProfitOptimizer
 
 
 logger = logging.getLogger(__name__)

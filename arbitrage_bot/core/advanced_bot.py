@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .advanced_arbitrage_engine import AdvancedArbitrageEngine
 from .optimized_config import OptimizedConfig
-from logging_utils import configure_root_logging, create_adapter, generate_cycle_id
+from arbitrage_bot.utils.logging_utils import configure_root_logging, create_adapter, generate_cycle_id
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent

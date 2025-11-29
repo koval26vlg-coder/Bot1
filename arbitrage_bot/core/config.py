@@ -9,7 +9,7 @@ from itertools import product
 
 import requests
 from dotenv import load_dotenv
-from logging_utils import (
+from arbitrage_bot.utils.logging_utils import (
     LOG_FORMAT,
     ContextFilter,
     configure_root_logging,

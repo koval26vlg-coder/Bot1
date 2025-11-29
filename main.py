@@ -12,7 +12,7 @@ from typing import Callable, Dict, Optional
 
 from arbitrage_bot.core.engine import AdvancedArbitrageEngine, HistoricalReplayer, run_advanced_bot
 from arbitrage_bot.core.optimized_config import OptimizedConfig
-from logging_utils import configure_root_logging, create_adapter, generate_cycle_id
+from arbitrage_bot.utils.logging_utils import configure_root_logging, create_adapter, generate_cycle_id
 
 advanced_main = run_advanced_bot
 
