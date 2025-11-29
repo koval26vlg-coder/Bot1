@@ -144,7 +144,31 @@ def test_min_profit_and_numeric_env_overrides(monkeypatch):
 
     assert config.MIN_TRIANGULAR_PROFIT == 0.42
     assert pytest.approx(config.EMPTY_CYCLE_RELAX_STEP, rel=1e-6) == 0.05
-    assert config._market_symbols_limit == 0
+    assert config._market_symbols_limit == 100
+
+
+def test_symbols_apply_limit(monkeypatch):
+    """Итоговый список тикеров обрезается по установленному лимиту."""
+
+    monkeypatch.setenv("TESTNET", "true")
+    monkeypatch.setenv("MARKET_SYMBOLS_LIMIT", "2")
+
+    module = _load_config_module()
+    config = module.Config()
+    real_cls = config.__class__
+
+    monkeypatch.setattr(real_cls, "_fetch_market_symbols", lambda self: ["AAAUSDT", "BBBUSD", "CCCUSDT"])
+    monkeypatch.setattr(
+        real_cls,
+        "_build_triangle_templates",
+        lambda self, symbols: [{"name": "triangle", "legs": ["AAAUSDT", "BBBUSD", "CCCUSDT"]}],
+    )
+
+    config.reset_symbol_caches()
+
+    symbols = config.SYMBOLS
+
+    assert len(symbols) == 2
 
 
 def test_triangular_pairs_cache_reset(monkeypatch):

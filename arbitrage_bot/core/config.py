@@ -118,7 +118,7 @@ class Config:
             'SIMULATION_AUTO_COMPLETE_PARTIALS',
             'true',
         ).lower() == 'true'
-        self._market_symbols_limit = self._load_int_env('MARKET_SYMBOLS_LIMIT', 0)
+        self._market_symbols_limit = self._load_int_env('MARKET_SYMBOLS_LIMIT', 100)
         # Длительность кэша для треугольников (в секундах)
         self._triangles_cache_ttl = 60
         self.WEBSOCKET_PRICE_ONLY = os.getenv('WEBSOCKET_PRICE_ONLY', 'false').lower() == 'true'
@@ -272,7 +272,18 @@ class Config:
                     if default_symbol not in watchlist:
                         watchlist.append(default_symbol)
 
-            self._symbol_watchlist_cache = self._filter_symbols_by_market_category(watchlist)
+            filtered_watchlist = self._filter_symbols_by_market_category(watchlist)
+            limit = self._market_symbols_limit
+
+            if limit and len(filtered_watchlist) > limit:
+                logger.warning(
+                    "Список наблюдаемых тикеров сокращён с %s до лимита %s",
+                    len(filtered_watchlist),
+                    limit,
+                )
+                filtered_watchlist = filtered_watchlist[:limit]
+
+            self._symbol_watchlist_cache = filtered_watchlist
         return self._symbol_watchlist_cache
 
     @property
