@@ -220,7 +220,7 @@ def main(logger_adapter=None, *, mode: str = "standard", environment: str | None
     else:
         logger.info("📂 Используется локальная версия AdvancedArbitrageEngine: %s", engine_module_path)
 
-    engine = AdvancedArbitrageEngine()
+    engine = AdvancedArbitrageEngine(config)
     killer = GracefulKiller()
     use_async_market = engine._should_use_async_market()
     iteration_count = 0

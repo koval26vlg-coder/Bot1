@@ -79,6 +79,8 @@ class MLProfitOptimizer:
     def ml_supported(self) -> bool:
         """Показывает, доступна ли ML-функциональность (импортирована ли scikit-learn)."""
 
+        if self._uses_builtin_backend:
+            return False
         return self._sklearn_modules is not None
 
     def _ensure_sklearn(self) -> None:
