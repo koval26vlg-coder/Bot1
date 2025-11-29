@@ -10,9 +10,15 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
-from arbitrage_bot.core.engine import AdvancedArbitrageEngine, HistoricalReplayer, run_advanced_bot
-from arbitrage_bot.core.optimized_config import OptimizedConfig
-from arbitrage_bot.utils.logging_utils import configure_root_logging, create_adapter, generate_cycle_id
+from arbitrage_bot import (
+    AdvancedArbitrageEngine,
+    HistoricalReplayer,
+    OptimizedConfig,
+    configure_root_logging,
+    create_adapter,
+    generate_cycle_id,
+    run_advanced_bot,
+)
 
 advanced_main = run_advanced_bot
 
@@ -124,9 +130,9 @@ def _prepare_quick_config(
     optimized.TESTNET = True
 
     if min_profit is not None:
-        optimized._min_triangular_profit_override = min_profit
+        optimized.MIN_TRIANGULAR_PROFIT = float(min_profit)
     if trade_amount is not None:
-        optimized._TRADE_AMOUNT = trade_amount
+        optimized.TRADE_AMOUNT = float(trade_amount)
 
     logger.info("Используется OptimizedConfig в режиме тестнета")
 
